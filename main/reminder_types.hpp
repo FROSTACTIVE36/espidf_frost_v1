@@ -63,7 +63,6 @@ struct ReminderConfig
     uint32_t display_ms = 10000;
 
     bool require_ack = false;
-    uint16_t snooze_min = 5;
 
     uint8_t start_hour = 0;
     uint8_t start_minute = 0;
@@ -102,7 +101,6 @@ struct MeditationConfig
     uint32_t display_ms = 600000;
 
     bool require_ack = false;
-    uint16_t snooze_min = 5;
 
     uint8_t day_mask = 0;
 };
@@ -150,7 +148,12 @@ struct MedicationConfig
     bool enabled = false;
 
     bool require_ack = true;
+
+    /*
+     * Snooze exists only for medication.
+     */
     uint16_t snooze_min = 10;
+
     uint32_t display_ms = 60000;
 
     MedicationItem medicines[MAX_MEDICINES] = {};
@@ -198,7 +201,6 @@ struct CustomReminderConfig
     bool enabled = false;
 
     bool require_ack = true;
-    uint16_t snooze_min = 5;
 
     CustomEvent events[MAX_CUSTOM_EVENTS] = {};
     std::size_t event_count = 0;
@@ -225,5 +227,11 @@ struct ActiveReminder
     uint32_t display_ms = 0;
 
     bool require_ack = false;
+
+    /*
+     * Kept here because the currently active medication reminder
+     * needs to store its snooze duration.
+     * It remains 0 for every non-medication reminder.
+     */
     uint16_t snooze_min = 0;
 };

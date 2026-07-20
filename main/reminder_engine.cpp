@@ -534,9 +534,7 @@ static void update_standard_reminder(
     reminder.type = type;
     reminder.display_ms = config.display_ms;
     reminder.require_ack = config.require_ack;
-    reminder.snooze_min = config.snooze_min;
-
-    if (config.mode == ReminderMode::INTERVAL)
+if (config.mode == ReminderMode::INTERVAL)
     {
         if (config.interval_ms == 0)
         {
@@ -670,9 +668,7 @@ static void update_meditation(
     reminder.type = ReminderType::MEDITATION;
     reminder.display_ms = meditation_config.display_ms;
     reminder.require_ack = meditation_config.require_ack;
-    reminder.snooze_min = meditation_config.snooze_min;
-
-    if (enqueue_reminder(reminder))
+if (enqueue_reminder(reminder))
     {
         meditation_runtime.last_trigger_year =
             time_info.tm_year;
@@ -903,11 +899,7 @@ static void update_custom(
 
         reminder.require_ack =
             custom_config.require_ack;
-
-        reminder.snooze_min =
-            custom_config.snooze_min;
-
-        if (enqueue_reminder(reminder))
+if (enqueue_reminder(reminder))
         {
             runtime.last_trigger_year =
                 time_info.tm_year;
@@ -1157,34 +1149,38 @@ void reminder_engine_snooze_active()
 {
     if (!active_reminder.active)
     {
+        ESP_LOGW(TAG, "No active reminder to snooze");
+        return;
+    }
+
+    /*
+     * Snooze is supported only for medication reminders.
+     * Every other reminder ignores the snooze command.
+     */
+    if (active_reminder.type != ReminderType::MEDICATION)
+    {
+        ESP_LOGW(
+            TAG,
+            "Snooze rejected for %s; only medication supports snooze",
+            reminder_type_name(active_reminder.type)
+        );
         return;
     }
 
     if (active_reminder.snooze_min == 0)
     {
-        reminder_engine_acknowledge_active();
+        ESP_LOGW(TAG, "Medication snooze duration is zero");
         return;
     }
 
     QueuedReminder reminder;
 
-    reminder.type =
-        active_reminder.type;
-
-    reminder.item_index =
-        active_reminder.item_index;
-
-    reminder.schedule_index =
-        active_reminder.schedule_index;
-
-    reminder.display_ms =
-        active_reminder.display_ms;
-
-    reminder.require_ack =
-        active_reminder.require_ack;
-
-    reminder.snooze_min =
-        active_reminder.snooze_min;
+    reminder.type = ReminderType::MEDICATION;
+    reminder.item_index = active_reminder.item_index;
+    reminder.schedule_index = active_reminder.schedule_index;
+    reminder.display_ms = active_reminder.display_ms;
+    reminder.require_ack = active_reminder.require_ack;
+    reminder.snooze_min = active_reminder.snooze_min;
 
     snoozed_reminder.valid = true;
     snoozed_reminder.reminder = reminder;
@@ -1198,6 +1194,12 @@ void reminder_engine_snooze_active()
             60ULL *
             1000ULL
         );
+
+    ESP_LOGI(
+        TAG,
+        "Medication snoozed for %u minutes",
+        static_cast<unsigned>(active_reminder.snooze_min)
+    );
 
     finish_active_reminder();
     start_next_queued_reminder();

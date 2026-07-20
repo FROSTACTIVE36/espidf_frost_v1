@@ -407,17 +407,7 @@ static ReminderConfig parse_standard_config(
             "require_ack",
             false
         );
-
-    config.snooze_min =
-        static_cast<uint16_t>(
-            get_int(
-                reminder_json,
-                "snooze_min",
-                5
-            )
-        );
-
-    config.start_hour =
+config.start_hour =
         static_cast<uint8_t>(
             get_int(
                 reminder_json,
@@ -534,17 +524,7 @@ static MeditationConfig parse_meditation_config(
             "require_ack",
             false
         );
-
-    config.snooze_min =
-        static_cast<uint16_t>(
-            get_int(
-                meditation_json,
-                "snooze_min",
-                5
-            )
-        );
-
-    config.day_mask =
+config.day_mask =
         parse_day_mask(
             meditation_json,
             "days"
@@ -841,17 +821,7 @@ static CustomReminderConfig parse_custom_config(
             "require_ack",
             true
         );
-
-    config.snooze_min =
-        static_cast<uint16_t>(
-            get_int(
-                custom_json,
-                "snooze_min",
-                5
-            )
-        );
-
-    const cJSON* events =
+const cJSON* events =
         cJSON_GetObjectItemCaseSensitive(
             custom_json,
             "events"

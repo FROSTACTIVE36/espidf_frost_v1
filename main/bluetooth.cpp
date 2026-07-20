@@ -8,6 +8,9 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 
@@ -32,6 +35,8 @@ static const char *TAG = "FROST_BLE";
 #define BLE_DEVICE_NAME       "ESP32_RTC"
 #define BLE_COMMAND_MAX_LEN   128
 #define JSON_CONFIG_MAX_LEN   8192
+#define JSON_WORKER_STACK_SIZE 8192
+#define JSON_WORKER_PRIORITY   5
 
 
 /*
@@ -81,6 +86,16 @@ static char json_configuration_buffer[
 
 static size_t json_configuration_length = 0;
 static bool json_reception_active = false;
+
+/*
+ * The NimBLE host callback must remain lightweight. Completed JSON is copied
+ * into this worker buffer and parsed by a separate FreeRTOS task.
+ */
+static char json_worker_buffer[JSON_CONFIG_MAX_LEN];
+static size_t json_worker_length = 0;
+static bool json_worker_busy = false;
+static TaskHandle_t json_worker_task_handle = nullptr;
+static portMUX_TYPE json_worker_lock = portMUX_INITIALIZER_UNLOCKED;
 
 
 /* =========================================================
@@ -231,14 +246,65 @@ static bool append_json_chunk(
 }
 
 
+static void json_configuration_worker_task(
+    void *parameter
+)
+{
+    (void)parameter;
+
+    ESP_LOGI(TAG, "JSON configuration worker started");
+
+    for (;;)
+    {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        const size_t json_length = json_worker_length;
+
+        bool configuration_applied = false;
+
+        if (
+            json_configuration_handler != nullptr &&
+            json_length > 0
+        )
+        {
+            ESP_LOGI(
+                TAG,
+                "Worker applying JSON, length=%u",
+                static_cast<unsigned int>(json_length)
+            );
+
+            configuration_applied =
+                json_configuration_handler(
+                    json_worker_buffer,
+                    json_length
+                );
+        }
+
+        if (configuration_applied)
+        {
+            set_ble_status("OK:JSON_APPLIED");
+            ESP_LOGI(TAG, "JSON configuration applied");
+        }
+        else
+        {
+            set_ble_status("ERROR:JSON_PARSE_FAILED");
+            ESP_LOGE(TAG, "JSON configuration failed");
+        }
+
+        taskENTER_CRITICAL(&json_worker_lock);
+        json_worker_length = 0;
+        json_worker_buffer[0] = '\0';
+        json_worker_busy = false;
+        taskEXIT_CRITICAL(&json_worker_lock);
+    }
+}
+
+
 static bool finish_json_reception(void)
 {
     if (!json_reception_active)
     {
-        set_ble_status(
-            "ERROR:JSON_BEGIN_REQUIRED"
-        );
-
+        set_ble_status("ERROR:JSON_BEGIN_REQUIRED");
         return false;
     }
 
@@ -246,61 +312,71 @@ static bool finish_json_reception(void)
 
     if (json_configuration_length == 0)
     {
-        set_ble_status(
-            "ERROR:EMPTY_JSON"
-        );
-
+        set_ble_status("ERROR:EMPTY_JSON");
         reset_json_reception();
+        return false;
+    }
 
+    if (json_configuration_handler == nullptr)
+    {
+        set_ble_status("ERROR:NO_JSON_HANDLER");
+        reset_json_reception();
+        return false;
+    }
+
+    if (json_worker_task_handle == nullptr)
+    {
+        set_ble_status("ERROR:JSON_WORKER_NOT_READY");
+        reset_json_reception();
         return false;
     }
 
     ESP_LOGI(
         TAG,
         "Complete JSON received, length=%u",
-        static_cast<unsigned int>(
-            json_configuration_length
-        )
+        static_cast<unsigned int>(json_configuration_length)
     );
 
-    if (json_configuration_handler == nullptr)
+    bool accepted = false;
+
+    taskENTER_CRITICAL(&json_worker_lock);
+
+    if (!json_worker_busy)
     {
-        set_ble_status(
-            "ERROR:NO_JSON_HANDLER"
-        );
-
-        reset_json_reception();
-
-        return false;
+        json_worker_busy = true;
+        accepted = true;
     }
 
-    bool configuration_applied =
-        json_configuration_handler(
+    taskEXIT_CRITICAL(&json_worker_lock);
+
+    if (accepted)
+    {
+        /*
+         * The worker cannot access this buffer until it is notified below,
+         * so the larger copy is deliberately performed outside the critical
+         * section.
+         */
+        memcpy(
+            json_worker_buffer,
             json_configuration_buffer,
-            json_configuration_length
+            json_configuration_length + 1
         );
 
-    if (!configuration_applied)
-    {
-        set_ble_status(
-            "ERROR:JSON_PARSE_FAILED"
-        );
-
-        reset_json_reception();
-
-        return false;
+        json_worker_length = json_configuration_length;
     }
-
-    set_ble_status(
-        "OK:JSON_APPLIED"
-    );
-
-    ESP_LOGI(
-        TAG,
-        "JSON configuration applied"
-    );
 
     reset_json_reception();
+
+    if (!accepted)
+    {
+        set_ble_status("ERROR:JSON_WORKER_BUSY");
+        return false;
+    }
+
+    set_ble_status("OK:JSON_QUEUED");
+    xTaskNotifyGive(json_worker_task_handle);
+
+    ESP_LOGI(TAG, "JSON handed to configuration worker");
 
     return true;
 }
@@ -1023,6 +1099,22 @@ esp_err_t bluetooth_init(
         );
 
         return ESP_FAIL;
+    }
+
+    BaseType_t task_result = xTaskCreate(
+        json_configuration_worker_task,
+        "ble_json_worker",
+        JSON_WORKER_STACK_SIZE,
+        nullptr,
+        JSON_WORKER_PRIORITY,
+        &json_worker_task_handle
+    );
+
+    if (task_result != pdPASS)
+    {
+        ESP_LOGE(TAG, "Could not create JSON worker task");
+        json_worker_task_handle = nullptr;
+        return ESP_ERR_NO_MEM;
     }
 
     nimble_port_freertos_init(
