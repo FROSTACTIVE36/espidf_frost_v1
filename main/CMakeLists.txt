@@ -4,6 +4,8 @@ idf_component_register(
         "display.cpp"
          "reminder_engine.cpp"
         "config_parser.cpp"
+        "bluetooth.cpp"
+        "rtc_ds3231.cpp"
 
     INCLUDE_DIRS
         "."
@@ -13,6 +15,8 @@ idf_component_register(
         esp_lcd
         esp_timer
         driver
+         bt
+        nvs_flash
         
 )
 

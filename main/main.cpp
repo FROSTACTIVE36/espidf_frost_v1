@@ -1,16 +1,20 @@
+#include <cstddef>
 #include <cstdio>
 #include <ctime>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "esp_err.h"
 #include "esp_log.h"
-#include "esp_timer.h"
+#include "nvs_flash.h"
 
+#include "bluetooth.hpp"
+#include "config_parser.hpp"
 #include "display.hpp"
 #include "reminder_engine.hpp"
 #include "reminder_types.hpp"
-#include "config_parser.hpp"
+#include "rtc_ds3231.hpp"
 
 /* =========================================================
  * Logging
@@ -681,6 +685,205 @@ static void dismiss_current_reminder()
 }
 
 /* =========================================================
+ * Apply JSON received through Bluetooth
+ * ========================================================= */
+
+static bool apply_bluetooth_json(
+    const char* json_text,
+    std::size_t json_length
+)
+{
+    if (
+        json_text == nullptr ||
+        json_length == 0
+    )
+    {
+        ESP_LOGE(
+            TAG,
+            "Bluetooth JSON is empty"
+        );
+
+        return false;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "Applying Bluetooth JSON, size=%u bytes",
+        static_cast<unsigned int>(json_length)
+    );
+
+    char parser_error[160] = {};
+
+    const bool applied =
+        reminder_config_parse_and_apply(
+            json_text,
+            parser_error,
+            sizeof(parser_error)
+        );
+
+    if (!applied)
+    {
+        ESP_LOGE(
+            TAG,
+            "Bluetooth JSON rejected: %s",
+            parser_error[0] != '\0'
+                ? parser_error
+                : "Unknown parser error"
+        );
+
+        return false;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "Bluetooth reminder configuration applied"
+    );
+
+    return true;
+}
+
+
+/* =========================================================
+ * Initialize NVS
+ * ========================================================= */
+
+static bool initialize_nvs()
+{
+    esp_err_t error =
+        nvs_flash_init();
+
+    if (
+        error == ESP_ERR_NVS_NO_FREE_PAGES ||
+        error == ESP_ERR_NVS_NEW_VERSION_FOUND
+    )
+    {
+        ESP_LOGW(
+            TAG,
+            "NVS requires erase and reinitialization"
+        );
+
+        error = nvs_flash_erase();
+
+        if (error != ESP_OK)
+        {
+            ESP_LOGE(
+                TAG,
+                "NVS erase failed: %s",
+                esp_err_to_name(error)
+            );
+
+            return false;
+        }
+
+        error = nvs_flash_init();
+    }
+
+    if (error != ESP_OK)
+    {
+        ESP_LOGE(
+            TAG,
+            "NVS initialization failed: %s",
+            esp_err_to_name(error)
+        );
+
+        return false;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "NVS initialized"
+    );
+
+    return true;
+}
+
+
+/* =========================================================
+ * Initialize RTC and synchronize ESP32 system time
+ * ========================================================= */
+
+static void initialize_rtc()
+{
+    const esp_err_t init_error =
+        rtc_ds3231_init();
+
+    if (init_error != ESP_OK)
+    {
+        ESP_LOGE(
+            TAG,
+            "DS3231 initialization failed: %s",
+            esp_err_to_name(init_error)
+        );
+
+        ESP_LOGW(
+            TAG,
+            "BLE can start, but SET time will fail until RTC is available"
+        );
+
+        return;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "DS3231 initialized"
+    );
+
+    const esp_err_t sync_error =
+        rtc_ds3231_sync_system_time();
+
+    if (sync_error != ESP_OK)
+    {
+        ESP_LOGW(
+            TAG,
+            "Initial RTC synchronization failed: %s",
+            esp_err_to_name(sync_error)
+        );
+
+        ESP_LOGW(
+            TAG,
+            "Send SET YYYY-MM-DD HH:MM:SS through BLE"
+        );
+
+        return;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "ESP32 system time synchronized from DS3231"
+    );
+}
+
+
+/* =========================================================
+ * Initialize Bluetooth
+ * ========================================================= */
+
+static void initialize_bluetooth()
+{
+    const esp_err_t bluetooth_error =
+        bluetooth_init(
+            apply_bluetooth_json
+        );
+
+    if (bluetooth_error != ESP_OK)
+    {
+        ESP_LOGE(
+            TAG,
+            "Bluetooth initialization failed: %s",
+            esp_err_to_name(bluetooth_error)
+        );
+
+        return;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "Bluetooth ready; advertising as ESP32_RTC"
+    );
+}
+
+
+/* =========================================================
  * Application entry point
  * ========================================================= */
 
@@ -702,6 +905,15 @@ extern "C" void app_main()
     );
 
     /* -----------------------------------------------------
+     * NVS is required by the Bluetooth stack.
+     * ----------------------------------------------------- */
+
+    if (!initialize_nvs())
+    {
+        return;
+    }
+
+    /* -----------------------------------------------------
      * Initialize display
      * ----------------------------------------------------- */
 
@@ -715,10 +927,6 @@ extern "C" void app_main()
         return;
     }
 
-    /* -----------------------------------------------------
-     * Show Frost boot logo
-     * ----------------------------------------------------- */
-
     display_show_frost_logo();
 
     vTaskDelay(
@@ -726,7 +934,13 @@ extern "C" void app_main()
     );
 
     /* -----------------------------------------------------
-     * Initialize reminder engine
+     * Initialize DS3231 and load system time
+     * ----------------------------------------------------- */
+
+    initialize_rtc();
+
+    /* -----------------------------------------------------
+     * Initialize reminder engine and callbacks
      * ----------------------------------------------------- */
 
     reminder_engine_init();
@@ -740,19 +954,26 @@ extern "C" void app_main()
     );
 
     /* -----------------------------------------------------
-     * Load reminder JSON
+     * Load embedded default reminder JSON
      * ----------------------------------------------------- */
 
     if (!load_reminder_configuration())
     {
         ESP_LOGE(
             TAG,
-            "Reminder configuration could not be loaded"
+            "Default reminder configuration could not be loaded"
         );
     }
 
     /* -----------------------------------------------------
-     * Log current date and time
+     * Start Bluetooth after reminder engine and parser
+     * are ready.
+     * ----------------------------------------------------- */
+
+    initialize_bluetooth();
+
+    /* -----------------------------------------------------
+     * Display current system time and warn when invalid
      * ----------------------------------------------------- */
 
     log_system_time();
@@ -771,22 +992,10 @@ extern "C" void app_main()
         const time_t now =
             time(nullptr);
 
-        /*
-         * Check every reminder configuration.
-         *
-         * The engine will call on_reminder_triggered()
-         * when a reminder becomes active.
-         */
         reminder_engine_update(
             now
         );
 
-        /*
-         * Only show the clock when no reminder is active.
-         *
-         * This prevents the clock screen from immediately
-         * overwriting a reminder screen.
-         */
         if (!reminder_engine_has_active_reminder())
         {
             display_show_home_clock(
@@ -794,13 +1003,6 @@ extern "C" void app_main()
             );
         }
 
-        /*
-         * Check reminders four times per second.
-         *
-         * Absolute medication/custom reminders are still
-         * protected against firing repeatedly during the
-         * same minute.
-         */
         vTaskDelay(
             pdMS_TO_TICKS(250)
         );
