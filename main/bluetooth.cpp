@@ -7,7 +7,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
-
+#include <cstdio>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -23,6 +23,7 @@
 #include "services/gatt/ble_svc_gatt.h"
 
 #include "rtc_ds3231.hpp"
+#include "pomodoro.hpp"
 
 
 static const char *TAG = "FROST_BLE";
@@ -462,6 +463,33 @@ static bool process_ble_command(
             "OK:JSON_CANCELLED"
         );
 
+        return true;
+    }
+
+    if (strcmp(command, "POMO:LAP_STATUS") == 0)
+    {
+        char response[128] = {};
+
+        const int active_index =
+            pomodoro_get_active_lap_index();
+
+        std::snprintf(
+            response,
+            sizeof(response),
+            "POMO_LAP:mode=%s,active=%s,index=%d,laps=%u",
+            pomodoro_is_lap_mode_enabled()
+                ? "lap"
+                : "manual",
+            pomodoro_is_running()
+                ? "running"
+                : "idle",
+            active_index,
+            static_cast<unsigned>(
+                pomodoro_get_lap_count()
+            )
+        );
+
+        set_ble_status(response);
         return true;
     }
 

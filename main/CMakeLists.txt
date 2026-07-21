@@ -1,11 +1,14 @@
 idf_component_register(
     SRCS
         "main.cpp"
+        "configuration_storage.cpp"
         "display.cpp"
          "reminder_engine.cpp"
         "config_parser.cpp"
         "bluetooth.cpp"
         "rtc_ds3231.cpp"
+         "pomodoro.cpp"
+        "acknowledgement_input.cpp"
 
     INCLUDE_DIRS
         "."

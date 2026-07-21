@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <ctime>
+#include "pomodoro.hpp"
 
 bool display_init();
 
@@ -40,4 +41,15 @@ void display_show_custom_reminder(
 
 void display_show_home_clock(
     time_t current_time
+);
+void display_show_pomodoro_focus(
+    uint32_t remaining_seconds,
+    uint32_t total_seconds,
+    const PomodoroCounterStyle& style
+);
+
+void display_show_pomodoro_break(
+    uint32_t remaining_seconds,
+    uint32_t total_seconds,
+    const PomodoroCounterStyle& style
 );

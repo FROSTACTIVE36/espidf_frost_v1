@@ -10,6 +10,7 @@ static const char* TAG = "REMINDER_ENGINE";
 
 static constexpr std::size_t STANDARD_REMINDER_COUNT = 4;
 static constexpr std::size_t REMINDER_QUEUE_SIZE = 16;
+static constexpr uint32_t ACK_QUEUE_PREVIEW_MS = 5000;
 
 struct StandardReminderRuntime
 {
@@ -96,7 +97,22 @@ static std::size_t queue_head = 0;
 static std::size_t queue_tail = 0;
 static std::size_t queue_count = 0;
 
+/*
+ * After one acknowledgement, only the reminders that were already
+ * waiting in the queue are previewed. Each is shown for five seconds
+ * and then cleared automatically without requiring another ACK.
+ */
+static std::size_t ack_preview_remaining = 0;
+static bool ack_preview_active = false;
+
 static SnoozedReminder snoozed_reminder;
+
+/*
+ * When true, only medication reminders are permitted to become active.
+ * All reminder schedules are still evaluated and non-medication reminders
+ * remain queued until normal activation is restored.
+ */
+static bool medication_only_activation = false;
 
 static uint64_t current_millis()
 {
@@ -399,6 +415,72 @@ static bool dequeue_reminder(
     return true;
 }
 
+/*
+ * Removes the first queued reminder of the requested type while preserving
+ * the relative order of every other queued reminder.
+ */
+static bool dequeue_first_reminder_of_type(
+    ReminderType requested_type,
+    QueuedReminder& reminder
+)
+{
+    if (queue_count == 0)
+    {
+        return false;
+    }
+
+    std::size_t match_offset = queue_count;
+
+    for (std::size_t offset = 0; offset < queue_count; ++offset)
+    {
+        const std::size_t index =
+            (queue_head + offset) % REMINDER_QUEUE_SIZE;
+
+        if (reminder_queue[index].type == requested_type)
+        {
+            match_offset = offset;
+            break;
+        }
+    }
+
+    if (match_offset == queue_count)
+    {
+        return false;
+    }
+
+    const std::size_t match_index =
+        (queue_head + match_offset) % REMINDER_QUEUE_SIZE;
+
+    reminder = reminder_queue[match_index];
+
+    /*
+     * Shift later logical queue entries one position toward the head.
+     */
+    for (
+        std::size_t offset = match_offset;
+        offset + 1 < queue_count;
+        ++offset
+    )
+    {
+        const std::size_t destination =
+            (queue_head + offset) % REMINDER_QUEUE_SIZE;
+
+        const std::size_t source =
+            (queue_head + offset + 1) % REMINDER_QUEUE_SIZE;
+
+        reminder_queue[destination] =
+            reminder_queue[source];
+    }
+
+    queue_tail =
+        (queue_tail + REMINDER_QUEUE_SIZE - 1) %
+        REMINDER_QUEUE_SIZE;
+
+    --queue_count;
+
+    return true;
+}
+
 static void start_reminder(
     const QueuedReminder& reminder
 )
@@ -479,9 +561,73 @@ static void start_next_queued_reminder()
 
     QueuedReminder reminder;
 
-    if (dequeue_reminder(reminder))
+    bool reminder_available = false;
+
+    if (medication_only_activation)
     {
-        start_reminder(reminder);
+        /*
+         * During Pomodoro focus, medication may bypass queued
+         * non-medication reminders. The skipped reminders stay queued.
+         */
+        reminder_available =
+            dequeue_first_reminder_of_type(
+                ReminderType::MEDICATION,
+                reminder
+            );
+    }
+    else
+    {
+        reminder_available =
+            dequeue_reminder(reminder);
+    }
+
+    if (!reminder_available)
+    {
+        /*
+         * Do not clear ACK preview state merely because focus mode has
+         * temporarily blocked the queued non-medication reminders.
+         */
+        if (!medication_only_activation)
+        {
+            ack_preview_active = false;
+            ack_preview_remaining = 0;
+        }
+
+        return;
+    }
+
+    /*
+     * During the acknowledge-all sequence, queued reminders are only
+     * previews. They are displayed for five seconds and do not wait for
+     * another acknowledgement.
+     */
+    if (ack_preview_active && ack_preview_remaining > 0)
+    {
+        reminder.display_ms = ACK_QUEUE_PREVIEW_MS;
+        reminder.require_ack = false;
+        reminder.snooze_min = 0;
+
+        --ack_preview_remaining;
+
+        ESP_LOGI(
+            TAG,
+            "ACK queue preview: %s, remaining after this=%u",
+            reminder_type_name(reminder.type),
+            static_cast<unsigned>(ack_preview_remaining)
+        );
+    }
+
+    start_reminder(reminder);
+
+    /*
+     * The current preview is the final reminder from the queue snapshot.
+     * Clear preview mode now; the active reminder still runs for five
+     * seconds because its copied ActiveReminder values are already set.
+     * Any reminders queued later retain their normal behaviour.
+     */
+    if (ack_preview_active && ack_preview_remaining == 0)
+    {
+        ack_preview_active = false;
     }
 }
 
@@ -534,7 +680,8 @@ static void update_standard_reminder(
     reminder.type = type;
     reminder.display_ms = config.display_ms;
     reminder.require_ack = config.require_ack;
-if (config.mode == ReminderMode::INTERVAL)
+
+    if (config.mode == ReminderMode::INTERVAL)
     {
         if (config.interval_ms == 0)
         {
@@ -668,7 +815,8 @@ static void update_meditation(
     reminder.type = ReminderType::MEDITATION;
     reminder.display_ms = meditation_config.display_ms;
     reminder.require_ack = meditation_config.require_ack;
-if (enqueue_reminder(reminder))
+
+    if (enqueue_reminder(reminder))
     {
         meditation_runtime.last_trigger_year =
             time_info.tm_year;
@@ -899,7 +1047,8 @@ static void update_custom(
 
         reminder.require_ack =
             custom_config.require_ack;
-if (enqueue_reminder(reminder))
+
+        if (enqueue_reminder(reminder))
         {
             runtime.last_trigger_year =
                 time_info.tm_year;
@@ -943,7 +1092,12 @@ void reminder_engine_init()
     queue_tail = 0;
     queue_count = 0;
 
+    ack_preview_remaining = 0;
+    ack_preview_active = false;
+
     snoozed_reminder = {};
+
+    medication_only_activation = false;
 
     ESP_LOGI(TAG, "Reminder engine initialized");
 }
@@ -1049,6 +1203,33 @@ reminder_engine_get_custom_config()
     return &custom_config;
 }
 
+void reminder_engine_set_medication_only_activation(
+    bool enabled
+)
+{
+    if (medication_only_activation == enabled)
+    {
+        return;
+    }
+
+    medication_only_activation = enabled;
+
+    ESP_LOGI(
+        TAG,
+        "Medication-only activation %s",
+        enabled ? "enabled" : "disabled"
+    );
+
+    /*
+     * When focus ends, immediately allow the oldest queued reminder
+     * to start instead of waiting for another scheduling cycle.
+     */
+    if (!medication_only_activation)
+    {
+        start_next_queued_reminder();
+    }
+}
+
 void reminder_engine_update(
     std::time_t current_time
 )
@@ -1141,8 +1322,44 @@ ReminderType reminder_engine_get_active_type()
 
 void reminder_engine_acknowledge_active()
 {
+    if (!active_reminder.active)
+    {
+        ESP_LOGW(TAG, "No active reminder to acknowledge");
+        return;
+    }
+
+    /*
+     * Snapshot the queue before finishing the current reminder.
+     * One ACK clears the current reminder normally, then every reminder
+     * already waiting is shown for five seconds and auto-cleared.
+     */
+    ack_preview_remaining = queue_count;
+    ack_preview_active = ack_preview_remaining > 0;
+
+    ESP_LOGI(
+        TAG,
+        "Acknowledging active reminder; queued previews=%u",
+        static_cast<unsigned>(ack_preview_remaining)
+    );
+
     finish_active_reminder();
     start_next_queued_reminder();
+}
+
+
+std::size_t reminder_engine_get_queue_count()
+{
+    return queue_count;
+}
+
+bool reminder_engine_is_ack_preview_active()
+{
+    return ack_preview_active ||
+           (
+               active_reminder.active &&
+               !active_reminder.require_ack &&
+               active_reminder.display_ms == ACK_QUEUE_PREVIEW_MS
+           );
 }
 
 void reminder_engine_snooze_active()

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <ctime>
 
 #include "reminder_types.hpp"
@@ -56,6 +57,18 @@ void reminder_engine_set_custom_config(
 const CustomReminderConfig*
 reminder_engine_get_custom_config();
 
+/*
+ * enabled = true:
+ *   only medication reminders may become active; all other reminder
+ *   schedules are still evaluated and remain queued.
+ *
+ * enabled = false:
+ *   all reminder types may become active normally.
+ */
+void reminder_engine_set_medication_only_activation(
+    bool enabled
+);
+
 void reminder_engine_update(
     std::time_t current_time
 );
@@ -68,6 +81,10 @@ reminder_engine_get_active_reminder();
 ReminderType reminder_engine_get_active_type();
 
 void reminder_engine_acknowledge_active();
+
+std::size_t reminder_engine_get_queue_count();
+
+bool reminder_engine_is_ack_preview_active();
 
 void reminder_engine_snooze_active();
 

@@ -1,5 +1,7 @@
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 
 #include "freertos/FreeRTOS.h"
@@ -7,14 +9,18 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 
+#include "acknowledgement_input.hpp"
 #include "bluetooth.hpp"
 #include "config_parser.hpp"
 #include "display.hpp"
+#include "pomodoro.hpp"
 #include "reminder_engine.hpp"
 #include "reminder_types.hpp"
 #include "rtc_ds3231.hpp"
+#include "configuration_storage.hpp"
 
 /* =========================================================
  * Logging
@@ -22,20 +28,27 @@
 
 static const char* TAG = "FROST_MAIN";
 
+
 /* =========================================================
- * Reminder JSON
- * =========================================================
- *
- * You can later replace this embedded JSON with:
- *
- * - SPIFFS JSON
- * - NVS configuration
- * - Bluetooth configuration
- * - Wi-Fi configuration
- * - Mobile application configuration
- *
- * For initial testing, the JSON is stored directly here.
- */
+ * Pomodoro double-tap detection
+ * ========================================================= */
+
+static bool pomodoro_first_tap_pending = false;
+static uint64_t pomodoro_first_tap_ms = 0;
+
+static constexpr uint64_t POMODORO_DOUBLE_TAP_MIN_MS = 120;
+static constexpr uint64_t POMODORO_DOUBLE_TAP_MAX_MS = 800;
+
+static uint64_t application_millis()
+{
+    return static_cast<uint64_t>(
+        esp_timer_get_time() / 1000ULL
+    );
+}
+
+/* =========================================================
+ * Reminder and Pomodoro JSON
+ * ========================================================= */
 
 static const char* REMINDER_JSON = R"json(
 {
@@ -51,7 +64,6 @@ static const char* REMINDER_JSON = R"json(
       "interval_ms": 60000,
       "display_ms": 10000,
       "require_ack": false,
-      "snooze_min": 5,
       "start_hour": 0,
       "start_min": 0,
       "end_hour": 23,
@@ -65,7 +77,6 @@ static const char* REMINDER_JSON = R"json(
       "interval_ms": 120000,
       "display_ms": 10000,
       "require_ack": false,
-      "snooze_min": 5,
       "start_hour": 0,
       "start_min": 0,
       "end_hour": 23,
@@ -79,7 +90,6 @@ static const char* REMINDER_JSON = R"json(
       "interval_ms": 180000,
       "display_ms": 10000,
       "require_ack": false,
-      "snooze_min": 5,
       "start_hour": 0,
       "start_min": 0,
       "end_hour": 23,
@@ -93,7 +103,6 @@ static const char* REMINDER_JSON = R"json(
       "interval_ms": 240000,
       "display_ms": 10000,
       "require_ack": false,
-      "snooze_min": 5,
       "start_hour": 0,
       "start_min": 0,
       "end_hour": 23,
@@ -109,7 +118,6 @@ static const char* REMINDER_JSON = R"json(
       "em": 0,
       "display_sec": 600,
       "require_ack": false,
-      "snooze_min": 5,
       "days": []
     },
 
@@ -187,7 +195,6 @@ static const char* REMINDER_JSON = R"json(
     "custom": {
       "enabled": true,
       "require_ack": false,
-      "snooze_min": 5,
 
       "events": [
         {
@@ -235,17 +242,58 @@ static const char* REMINDER_JSON = R"json(
         }
       ]
     }
+  },
+
+  "pomodoro": {
+    "enabled": true,
+
+    "focus_min": 25,
+    "break_min": 5,
+    "cycles": 4,
+
+    "auto_start_break": true,
+    "auto_start_focus": true,
+
+    "lap_mode_enabled": false,
+    "laps": [
+      {
+        "enabled": true,
+        "sh": 9,
+        "sm": 0,
+        "eh": 12,
+        "em": 0
+      },
+      {
+        "enabled": true,
+        "sh": 14,
+        "sm": 0,
+        "eh": 17,
+        "em": 0
+      }
+    ],
+
+    "focus_counter": {
+      "x": 120,
+      "y": 150,
+      "text_size": 3,
+      "text_color": 65535,
+      "text_align": 1
+    },
+
+    "break_counter": {
+      "x": 120,
+      "y": 150,
+      "text_size": 3,
+      "text_color": 0,
+      "text_align": 1
+    }
   }
 }
 )json";
 
 /* =========================================================
  * Reminder trigger callback
- * =========================================================
- *
- * This function is called by reminder_engine.cpp whenever a
- * reminder becomes active.
- */
+ * ========================================================= */
 
 static void on_reminder_triggered(
     ReminderType type,
@@ -263,10 +311,6 @@ static void on_reminder_triggered(
 
     switch (type)
     {
-        /* -------------------------------------------------
-         * Hydration
-         * ------------------------------------------------- */
-
         case ReminderType::HYDRATION:
         {
             ESP_LOGI(
@@ -278,10 +322,6 @@ static void on_reminder_triggered(
 
             break;
         }
-
-        /* -------------------------------------------------
-         * Stretch
-         * ------------------------------------------------- */
 
         case ReminderType::STRETCH:
         {
@@ -295,10 +335,6 @@ static void on_reminder_triggered(
             break;
         }
 
-        /* -------------------------------------------------
-         * Eye break
-         * ------------------------------------------------- */
-
         case ReminderType::EYE:
         {
             ESP_LOGI(
@@ -310,10 +346,6 @@ static void on_reminder_triggered(
 
             break;
         }
-
-        /* -------------------------------------------------
-         * Walk
-         * ------------------------------------------------- */
 
         case ReminderType::WALK:
         {
@@ -327,13 +359,6 @@ static void on_reminder_triggered(
             break;
         }
 
-        /* -------------------------------------------------
-         * Meditation
-         *
-         * Meditation uses a complete image.
-         * No dynamic text is drawn.
-         * ------------------------------------------------- */
-
         case ReminderType::MEDITATION:
         {
             ESP_LOGI(
@@ -345,13 +370,6 @@ static void on_reminder_triggered(
 
             break;
         }
-
-        /* -------------------------------------------------
-         * Medication
-         *
-         * item_index identifies the medicine.
-         * schedule_index identifies the medicine dose.
-         * ------------------------------------------------- */
 
         case ReminderType::MEDICATION:
         {
@@ -409,12 +427,6 @@ static void on_reminder_triggered(
 
             break;
         }
-
-        /* -------------------------------------------------
-         * Custom reminder
-         *
-         * item_index identifies the custom event.
-         * ------------------------------------------------- */
 
         case ReminderType::CUSTOM:
         {
@@ -487,15 +499,7 @@ static void on_reminder_triggered(
 
 /* =========================================================
  * Reminder finished callback
- * =========================================================
- *
- * Called when:
- *
- * - display timeout completes
- * - reminder is acknowledged
- * - reminder is cancelled
- * - reminder is snoozed
- */
+ * ========================================================= */
 
 static void on_reminder_finished(
     ReminderType type,
@@ -510,19 +514,33 @@ static void on_reminder_finished(
         item_index,
         schedule_index
     );
+
+    /*
+     * A reminder may have covered the Pomodoro break screen.
+     * Force Pomodoro to redraw after the reminder finishes.
+     */
+    pomodoro_force_redraw();
 }
 
 /* =========================================================
- * Load reminder configuration
+ * Load configuration
  * ========================================================= */
 
-static bool load_reminder_configuration()
+static bool apply_configuration_json(
+    const char* json_text,
+    const char* source_name
+)
 {
+    if (json_text == nullptr)
+    {
+        return false;
+    }
+
     char parser_error[160] = {};
 
     const bool parsed =
         reminder_config_parse_and_apply(
-            REMINDER_JSON,
+            json_text,
             parser_error,
             sizeof(parser_error)
         );
@@ -531,30 +549,94 @@ static bool load_reminder_configuration()
     {
         ESP_LOGE(
             TAG,
-            "Failed to parse reminder JSON: %s",
-            parser_error
+            "Failed to parse %s configuration: %s",
+            source_name,
+            parser_error[0] != '\0'
+                ? parser_error
+                : "Unknown parser error"
         );
 
         return false;
     }
 
+    pomodoro_force_redraw();
+
     ESP_LOGI(
         TAG,
-        "Reminder JSON loaded successfully"
+        "%s configuration applied successfully",
+        source_name
     );
 
     return true;
 }
 
+static bool load_startup_configuration()
+{
+    char* saved_json = nullptr;
+    std::size_t saved_length = 0;
+
+    const esp_err_t load_error =
+        configuration_storage_load(
+            &saved_json,
+            &saved_length
+        );
+
+    if (load_error == ESP_OK)
+    {
+        ESP_LOGI(
+            TAG,
+            "Applying saved user configuration"
+        );
+
+        const bool applied =
+            apply_configuration_json(
+                saved_json,
+                "saved user"
+            );
+
+        free(saved_json);
+
+        if (applied)
+        {
+            return true;
+        }
+
+        /*
+         * Saved JSON exists but is corrupted or incompatible.
+         * Clear it so the same failure does not repeat every boot.
+         */
+        ESP_LOGW(
+            TAG,
+            "Saved configuration is invalid; clearing it"
+        );
+
+        configuration_storage_clear();
+    }
+    else if (
+        load_error != ESP_ERR_NVS_NOT_FOUND
+    )
+    {
+        ESP_LOGW(
+            TAG,
+            "Could not load saved configuration: %s",
+            esp_err_to_name(load_error)
+        );
+    }
+
+    ESP_LOGI(
+        TAG,
+        "No valid saved configuration; applying default JSON"
+    );
+
+    return apply_configuration_json(
+        REMINDER_JSON,
+        "default"
+    );
+}
+
 /* =========================================================
  * Validate system time
- * =========================================================
- *
- * The reminder system requires valid date and time.
- *
- * If you already set the time from DS3231, SNTP, UART or NVS,
- * this function will return true.
- */
+ * ========================================================= */
 
 static bool system_time_is_valid()
 {
@@ -573,15 +655,6 @@ static bool system_time_is_valid()
 
     return current_year >= 2025;
 }
-
-/* =========================================================
- * Wait for valid time
- * =========================================================
- *
- * This does not set time. It only warns when time is invalid.
- * Your DS3231 or SNTP code should set the system time before
- * reminders are checked.
- */
 
 static void log_system_time()
 {
@@ -617,12 +690,8 @@ static void log_system_time()
 }
 
 /* =========================================================
- * Optional reminder action functions
- * =========================================================
- *
- * Call these functions from your physical button handler,
- * touch handler, BLE command or UART command.
- */
+ * Reminder controls
+ * ========================================================= */
 
 static void acknowledge_current_reminder()
 {
@@ -642,6 +711,116 @@ static void acknowledge_current_reminder()
     );
 
     reminder_engine_acknowledge_active();
+}
+
+/*
+ * Input behaviour:
+ *
+ * Active reminder:
+ *     acknowledge reminder
+ *
+ * No active reminder:
+ *     start or stop Pomodoro
+ */
+static void on_acknowledgement_input()
+{
+    /*
+     * Active reminder:
+     * one tap acknowledges immediately.
+     */
+    if (reminder_engine_has_active_reminder())
+    {
+        pomodoro_first_tap_pending = false;
+        pomodoro_first_tap_ms = 0;
+
+        acknowledge_current_reminder();
+        return;
+    }
+
+    const uint64_t now_ms =
+        application_millis();
+
+    /*
+     * First tap: wait for a second tap.
+     */
+    if (!pomodoro_first_tap_pending)
+    {
+        pomodoro_first_tap_pending = true;
+        pomodoro_first_tap_ms = now_ms;
+
+        ESP_LOGI(
+            TAG,
+            "Pomodoro first tap detected"
+        );
+
+        return;
+    }
+
+    const uint64_t elapsed_ms =
+        now_ms - pomodoro_first_tap_ms;
+
+    /*
+     * Reject sensor bounce/noise.
+     */
+    if (elapsed_ms < POMODORO_DOUBLE_TAP_MIN_MS)
+    {
+        ESP_LOGW(
+            TAG,
+            "Second tap ignored as bounce: %llu ms",
+            static_cast<unsigned long long>(elapsed_ms)
+        );
+
+        return;
+    }
+
+    /*
+     * Valid double tap: toggle once.
+     */
+    if (elapsed_ms <= POMODORO_DOUBLE_TAP_MAX_MS)
+    {
+        pomodoro_first_tap_pending = false;
+        pomodoro_first_tap_ms = 0;
+
+        ESP_LOGI(
+            TAG,
+            "Pomodoro double tap detected: %llu ms",
+            static_cast<unsigned long long>(elapsed_ms)
+        );
+
+        pomodoro_toggle();
+        return;
+    }
+
+    /*
+     * Old tap expired; this becomes the new first tap.
+     */
+    pomodoro_first_tap_pending = true;
+    pomodoro_first_tap_ms = now_ms;
+}
+
+static void update_pomodoro_double_tap()
+{
+    if (!pomodoro_first_tap_pending)
+    {
+        return;
+    }
+
+    const uint64_t now_ms =
+        application_millis();
+
+    if (
+        now_ms - pomodoro_first_tap_ms >
+        POMODORO_DOUBLE_TAP_MAX_MS
+    )
+    {
+        pomodoro_first_tap_pending = false;
+        pomodoro_first_tap_ms = 0;
+
+        ESP_LOGI(
+            TAG,
+            "Pomodoro single tap expired"
+        );
+    }
 }
 
 static void snooze_current_reminder()
@@ -685,7 +864,7 @@ static void dismiss_current_reminder()
 }
 
 /* =========================================================
- * Apply JSON received through Bluetooth
+ * Apply Bluetooth JSON
  * ========================================================= */
 
 static bool apply_bluetooth_json(
@@ -709,7 +888,9 @@ static bool apply_bluetooth_json(
     ESP_LOGI(
         TAG,
         "Applying Bluetooth JSON, size=%u bytes",
-        static_cast<unsigned int>(json_length)
+        static_cast<unsigned int>(
+            json_length
+        )
     );
 
     char parser_error[160] = {};
@@ -734,14 +915,39 @@ static bool apply_bluetooth_json(
         return false;
     }
 
+     const esp_err_t save_error =
+        configuration_storage_save(
+            json_text,
+            json_length
+        );
+
+    if (save_error != ESP_OK)
+    {
+        ESP_LOGE(
+            TAG,
+            "Configuration applied but could not be saved: %s",
+            esp_err_to_name(save_error)
+        );
+
+        /*
+         * Return false so Bluetooth can report that persistence failed.
+         * The configuration is active now, but would be lost on reboot.
+         */
+        return false;
+    }
+
+    /*
+     * JSON changes may include counter coordinates or colors.
+     */
+    pomodoro_force_redraw();
+
     ESP_LOGI(
         TAG,
-        "Bluetooth reminder configuration applied"
+        "Bluetooth configuration applied"
     );
 
     return true;
 }
-
 
 /* =========================================================
  * Initialize NVS
@@ -762,7 +968,8 @@ static bool initialize_nvs()
             "NVS requires erase and reinitialization"
         );
 
-        error = nvs_flash_erase();
+        error =
+            nvs_flash_erase();
 
         if (error != ESP_OK)
         {
@@ -775,7 +982,8 @@ static bool initialize_nvs()
             return false;
         }
 
-        error = nvs_flash_init();
+        error =
+            nvs_flash_init();
     }
 
     if (error != ESP_OK)
@@ -797,9 +1005,8 @@ static bool initialize_nvs()
     return true;
 }
 
-
 /* =========================================================
- * Initialize RTC and synchronize ESP32 system time
+ * Initialize RTC
  * ========================================================= */
 
 static void initialize_rtc()
@@ -853,7 +1060,6 @@ static void initialize_rtc()
     );
 }
 
-
 /* =========================================================
  * Initialize Bluetooth
  * ========================================================= */
@@ -870,7 +1076,9 @@ static void initialize_bluetooth()
         ESP_LOGE(
             TAG,
             "Bluetooth initialization failed: %s",
-            esp_err_to_name(bluetooth_error)
+            esp_err_to_name(
+                bluetooth_error
+            )
         );
 
         return;
@@ -881,7 +1089,6 @@ static void initialize_bluetooth()
         "Bluetooth ready; advertising as ESP32_RTC"
     );
 }
-
 
 /* =========================================================
  * Application entry point
@@ -905,7 +1112,7 @@ extern "C" void app_main()
     );
 
     /* -----------------------------------------------------
-     * NVS is required by the Bluetooth stack.
+     * Initialize NVS
      * ----------------------------------------------------- */
 
     if (!initialize_nvs())
@@ -934,16 +1141,17 @@ extern "C" void app_main()
     );
 
     /* -----------------------------------------------------
-     * Initialize DS3231 and load system time
+     * Initialize RTC
      * ----------------------------------------------------- */
 
     initialize_rtc();
 
     /* -----------------------------------------------------
-     * Initialize reminder engine and callbacks
+     * Initialize engines
      * ----------------------------------------------------- */
 
     reminder_engine_init();
+    pomodoro_init();
 
     reminder_engine_set_trigger_callback(
         on_reminder_triggered
@@ -954,26 +1162,57 @@ extern "C" void app_main()
     );
 
     /* -----------------------------------------------------
-     * Load embedded default reminder JSON
+     * Initialize acknowledgement/Pomodoro input
      * ----------------------------------------------------- */
 
-    if (!load_reminder_configuration())
+    AcknowledgementInputConfig acknowledgement_config;
+
+    acknowledgement_config.gpio =
+        GPIO_NUM_7;
+
+    acknowledgement_config.active_low =
+        true;
+
+    acknowledgement_config.debounce_ms =
+        50;
+
+    const esp_err_t acknowledgement_error =
+        acknowledgement_input_init(
+            acknowledgement_config,
+            on_acknowledgement_input
+        );
+
+    if (acknowledgement_error != ESP_OK)
     {
         ESP_LOGE(
             TAG,
-            "Default reminder configuration could not be loaded"
+            "Acknowledgement input initialization failed: %s",
+            esp_err_to_name(
+                acknowledgement_error
+            )
         );
     }
 
     /* -----------------------------------------------------
-     * Start Bluetooth after reminder engine and parser
-     * are ready.
+     * Load default JSON
+     * ----------------------------------------------------- */
+
+    if (!load_startup_configuration())
+    {
+        ESP_LOGE(
+            TAG,
+            "No valid configuration could be loaded"
+        );
+    }
+
+    /* -----------------------------------------------------
+     * Initialize Bluetooth
      * ----------------------------------------------------- */
 
     initialize_bluetooth();
 
     /* -----------------------------------------------------
-     * Display current system time and warn when invalid
+     * Show current time in logs
      * ----------------------------------------------------- */
 
     log_system_time();
@@ -984,7 +1223,7 @@ extern "C" void app_main()
     );
 
     /* -----------------------------------------------------
-     * Main application loop
+     * Main loop
      * ----------------------------------------------------- */
 
     while (true)
@@ -992,19 +1231,73 @@ extern "C" void app_main()
         const time_t now =
             time(nullptr);
 
+        /*
+         * Read the acknowledgement/Pomodoro input.
+         */
+        acknowledgement_input_update();
+        update_pomodoro_double_tap();
+
+        const bool pomodoro_focus_active =
+            pomodoro_is_running() &&
+            pomodoro_get_state() ==
+                PomodoroState::FOCUS;
+
+        /*
+         * During Pomodoro focus:
+         *
+         * - medication reminders may become active immediately
+         * - all other reminders are still detected and queued
+         * - queued non-medication reminders wait until break
+         *
+         * During break or normal clock mode:
+         *
+         * - all reminder types may become active normally
+         */
+        reminder_engine_set_medication_only_activation(
+            pomodoro_focus_active
+        );
+
+        /*
+         * Always update reminders before Pomodoro transitions.
+         *
+         * This ordering is important when a break reaches 00:00:
+         * a due or queued reminder becomes active first, allowing
+         * pomodoro_update() to hold the break until it finishes.
+         */
         reminder_engine_update(
             now
         );
 
-        if (!reminder_engine_has_active_reminder())
+        /*
+         * Update Pomodoro after reminder processing.
+         */
+        pomodoro_update();
+
+        /*
+         * Display priority:
+         *
+         * 1. Active reminder
+         * 2. Pomodoro focus/break screen
+         * 3. Home clock
+         */
+        if (
+            !reminder_engine_has_active_reminder()
+        )
         {
-            display_show_home_clock(
-                now
-            );
+            if (pomodoro_is_running())
+            {
+                pomodoro_render_if_needed();
+            }
+            else
+            {
+                display_show_home_clock(
+                    now
+                );
+            }
         }
 
         vTaskDelay(
-            pdMS_TO_TICKS(250)
+            pdMS_TO_TICKS(20)
         );
     }
 }

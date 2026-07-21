@@ -18,6 +18,8 @@
 #include "images/medication_background.h"
 #include "images/custom_background.h"
 #include "images/meditation.h"
+#include "images/pomodoro_focus_bg.h"
+#include "images/pomodoro_break_bg.h"
 
 static const char *TAG = "FROST_DISPLAY";
 
@@ -44,6 +46,18 @@ static constexpr int CLOCK_CENTER_Y = 120;
 
 static constexpr int CLOCK_PROGRESS_RADIUS = 112;
 static constexpr int CLOCK_PROGRESS_WIDTH = 6;
+
+/*
+ * Pomodoro progress geometry copied from the working Arduino version.
+ */
+static constexpr int POMODORO_CENTER_X = 118;
+static constexpr int POMODORO_CENTER_Y = 120;
+static constexpr int POMODORO_CLOCK_RADIUS = 105;
+static constexpr int POMODORO_PROGRESS_RADIUS = POMODORO_CLOCK_RADIUS + 2;
+static constexpr int POMODORO_PROGRESS_WIDTH = 7;
+
+static constexpr uint16_t POMODORO_FOCUS_ARC_COLOR = 0x8260;
+static constexpr uint16_t POMODORO_BREAK_ARC_COLOR = TFT_GREEN;
 
 /* =========================================================
  * LovyanGFX device
@@ -746,6 +760,187 @@ void display_show_meditation_reminder()
     );
 
     display.endWrite();
+}
+
+/* =========================================================
+ * Pomodoro display
+ * ========================================================= */
+
+static void draw_pomodoro_counter(
+    const uint16_t* background,
+    uint32_t remaining_seconds,
+    uint32_t total_seconds,
+    const PomodoroCounterStyle& style,
+    uint16_t arc_color
+)
+{
+    if (
+        !display_ready ||
+        !sprite_ready
+    )
+    {
+        return;
+    }
+
+    const uint32_t minutes =
+        remaining_seconds / 60U;
+
+    const uint32_t seconds =
+        remaining_seconds % 60U;
+
+    char timer_text[16] = {};
+
+    std::snprintf(
+        timer_text,
+        sizeof(timer_text),
+        "%02lu:%02lu",
+        static_cast<unsigned long>(minutes),
+        static_cast<unsigned long>(seconds)
+    );
+
+    /*
+     * Redraw the complete background before drawing the new
+     * timer and progress arc.
+     */
+    screen.setSwapBytes(true);
+
+    screen.pushImage(
+        0,
+        0,
+        DISPLAY_WIDTH,
+        DISPLAY_HEIGHT,
+        background
+    );
+
+    /*
+     * Match the circular progress indicator from the Arduino
+     * Pomodoro screen.
+     *
+     * It begins at 12 o'clock (270 degrees) and grows clockwise
+     * as the current focus or break stage elapses.
+     */
+    uint32_t elapsed_seconds = 0;
+
+    if (total_seconds > remaining_seconds)
+    {
+        elapsed_seconds =
+            total_seconds - remaining_seconds;
+    }
+
+    float progress = 0.0f;
+
+    if (total_seconds > 0U)
+    {
+        progress =
+            static_cast<float>(elapsed_seconds) /
+            static_cast<float>(total_seconds);
+    }
+
+    if (progress < 0.0f)
+    {
+        progress = 0.0f;
+    }
+    else if (progress > 1.0f)
+    {
+        progress = 1.0f;
+    }
+
+    const float start_angle = 270.0f;
+    const float end_angle =
+        start_angle + progress * 360.0f;
+
+    /*
+     * Keep the thin circular frame used by the Arduino UI.
+     */
+    screen.drawCircle(
+        POMODORO_CENTER_X,
+        POMODORO_CENTER_Y,
+        POMODORO_CLOCK_RADIUS,
+        TFT_BLACK
+    );
+
+    /*
+     * Avoid calling fillArc with a zero-length angle because
+     * some LovyanGFX versions may interpret equal angles as a
+     * complete circle.
+     */
+    if (elapsed_seconds > 0U)
+    {
+        screen.fillArc(
+            POMODORO_CENTER_X,
+            POMODORO_CENTER_Y,
+            POMODORO_PROGRESS_RADIUS,
+            POMODORO_PROGRESS_RADIUS +
+                POMODORO_PROGRESS_WIDTH - 1,
+            start_angle,
+            end_angle,
+            arc_color
+        );
+    }
+
+    /*
+     * Use the same custom font as the home clock.
+     */
+    screen.loadFont(font);
+
+    screen.setTextDatum(
+        get_reminder_text_datum(
+            style.text_align
+        )
+    );
+
+    screen.setTextColor(
+        style.text_color
+    );
+
+    screen.setTextSize(1);
+
+    screen.drawString(
+        timer_text,
+        style.x,
+        style.y
+    );
+
+    screen.unloadFont();
+
+    display.startWrite();
+
+    screen.pushSprite(
+        0,
+        0
+    );
+
+    display.endWrite();
+}
+
+void display_show_pomodoro_focus(
+    uint32_t remaining_seconds,
+    uint32_t total_seconds,
+    const PomodoroCounterStyle& style
+)
+{
+    draw_pomodoro_counter(
+        pomodoro_focus_bg_data,
+        remaining_seconds,
+        total_seconds,
+        style,
+        POMODORO_FOCUS_ARC_COLOR
+    );
+}
+
+void display_show_pomodoro_break(
+    uint32_t remaining_seconds,
+    uint32_t total_seconds,
+    const PomodoroCounterStyle& style
+)
+{
+    draw_pomodoro_counter(
+        pomodoro_break_bg_data,
+        remaining_seconds,
+        total_seconds,
+        style,
+        POMODORO_BREAK_ARC_COLOR
+    );
 }
 
 /* =========================================================

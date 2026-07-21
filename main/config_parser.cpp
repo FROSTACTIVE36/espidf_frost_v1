@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include "pomodoro.hpp"
 
 #include "cJSON.h"
 #include "esp_log.h"
@@ -1006,6 +1007,316 @@ const cJSON* events =
     return config;
 }
 
+/* =========================================================
+ * Pomodoro configuration parser
+ * ========================================================= */
+
+static PomodoroCounterStyle parse_pomodoro_counter_style(
+    const cJSON* object,
+    const PomodoroCounterStyle& defaults
+)
+{
+    PomodoroCounterStyle style =
+        defaults;
+
+    if (!cJSON_IsObject(object))
+    {
+        return style;
+    }
+
+    style.x =
+        static_cast<int16_t>(
+            get_int(
+                object,
+                "x",
+                style.x
+            )
+        );
+
+    style.y =
+        static_cast<int16_t>(
+            get_int(
+                object,
+                "y",
+                style.y
+            )
+        );
+
+    style.text_size =
+        static_cast<uint8_t>(
+            get_int(
+                object,
+                "text_size",
+                style.text_size
+            )
+        );
+
+    style.text_color =
+        static_cast<uint16_t>(
+            get_int(
+                object,
+                "text_color",
+                style.text_color
+            )
+        );
+
+    style.text_align =
+        static_cast<uint8_t>(
+            get_int(
+                object,
+                "text_align",
+                style.text_align
+            )
+        );
+
+    if (style.text_align > 2)
+    {
+        style.text_align = 1;
+    }
+
+    if (style.text_size == 0)
+    {
+        style.text_size = 1;
+    }
+
+    return style;
+}
+
+static PomodoroConfig parse_pomodoro_config(
+    const cJSON* pomodoro_json
+)
+{
+    PomodoroConfig config;
+
+    if (!cJSON_IsObject(pomodoro_json))
+    {
+        return config;
+    }
+
+    config.enabled =
+        get_bool(
+            pomodoro_json,
+            "enabled",
+            false
+        );
+
+    config.focus_min =
+        static_cast<uint16_t>(
+            get_int(
+                pomodoro_json,
+                "focus_min",
+                25
+            )
+        );
+
+    config.break_min =
+        static_cast<uint16_t>(
+            get_int(
+                pomodoro_json,
+                "break_min",
+                5
+            )
+        );
+
+    config.cycles =
+        static_cast<uint8_t>(
+            get_int(
+                pomodoro_json,
+                "cycles",
+                4
+            )
+        );
+
+    config.auto_start_break =
+        get_bool(
+            pomodoro_json,
+            "auto_start_break",
+            true
+        );
+
+    config.auto_start_focus =
+        get_bool(
+            pomodoro_json,
+            "auto_start_focus",
+            true
+        );
+
+    if (config.focus_min == 0)
+    {
+        config.focus_min = 1;
+    }
+
+    if (config.break_min == 0)
+    {
+        config.break_min = 1;
+    }
+
+    if (config.cycles == 0)
+    {
+        config.cycles = 1;
+    }
+
+    const cJSON* focus_counter =
+        cJSON_GetObjectItemCaseSensitive(
+            pomodoro_json,
+            "focus_counter"
+        );
+
+    const cJSON* break_counter =
+        cJSON_GetObjectItemCaseSensitive(
+            pomodoro_json,
+            "break_counter"
+        );
+
+    config.focus_counter =
+        parse_pomodoro_counter_style(
+            focus_counter,
+            config.focus_counter
+        );
+
+    config.break_counter =
+        parse_pomodoro_counter_style(
+            break_counter,
+            config.break_counter
+        );
+
+    config.lap_mode_enabled =
+        get_bool(
+            pomodoro_json,
+            "lap_mode_enabled",
+            false
+        );
+
+    const cJSON* laps =
+        cJSON_GetObjectItemCaseSensitive(
+            pomodoro_json,
+            "laps"
+        );
+
+    if (cJSON_IsArray(laps))
+    {
+        const cJSON* lap_json = nullptr;
+
+        cJSON_ArrayForEach(
+            lap_json,
+            laps
+        )
+        {
+            if (
+                config.lap_count >=
+                MAX_POMODORO_LAPS
+            )
+            {
+                break;
+            }
+
+            if (!cJSON_IsObject(lap_json))
+            {
+                continue;
+            }
+
+            const int start_hour =
+                get_int(
+                    lap_json,
+                    "sh",
+                    get_int(
+                        lap_json,
+                        "start_hour",
+                        -1
+                    )
+                );
+
+            const int start_minute =
+                get_int(
+                    lap_json,
+                    "sm",
+                    get_int(
+                        lap_json,
+                        "start_min",
+                        -1
+                    )
+                );
+
+            const int end_hour =
+                get_int(
+                    lap_json,
+                    "eh",
+                    get_int(
+                        lap_json,
+                        "end_hour",
+                        -1
+                    )
+                );
+
+            const int end_minute =
+                get_int(
+                    lap_json,
+                    "em",
+                    get_int(
+                        lap_json,
+                        "end_min",
+                        -1
+                    )
+                );
+
+            if (
+                start_hour < 0 ||
+                start_hour > 23 ||
+                start_minute < 0 ||
+                start_minute > 59 ||
+                end_hour < 0 ||
+                end_hour > 23 ||
+                end_minute < 0 ||
+                end_minute > 59
+            )
+            {
+                ESP_LOGW(
+                    TAG,
+                    "Ignoring invalid Pomodoro lap"
+                );
+
+                continue;
+            }
+
+            PomodoroLap& lap =
+                config.laps[
+                    config.lap_count
+                ];
+
+            lap.enabled =
+                get_bool(
+                    lap_json,
+                    "enabled",
+                    true
+                );
+
+            lap.start_hour =
+                static_cast<uint8_t>(
+                    start_hour
+                );
+
+            lap.start_minute =
+                static_cast<uint8_t>(
+                    start_minute
+                );
+
+            lap.end_hour =
+                static_cast<uint8_t>(
+                    end_hour
+                );
+
+            lap.end_minute =
+                static_cast<uint8_t>(
+                    end_minute
+                );
+
+            ++config.lap_count;
+        }
+    }
+
+    return config;
+}
+
 bool reminder_config_parse_and_apply(
     const char* json_text,
     char* error_message,
@@ -1138,6 +1449,38 @@ bool reminder_config_parse_and_apply(
     {
         reminder_engine_set_custom_config(
             parse_custom_config(custom)
+        );
+    }
+
+
+
+        /*
+     * Pomodoro is at the root level, not inside reminders.
+     */
+    const cJSON* pomodoro =
+        cJSON_GetObjectItemCaseSensitive(
+            root,
+            "pomodoro"
+        );
+
+    if (!cJSON_IsObject(pomodoro))
+    {
+        /*
+         * Backward compatibility with the Arduino JSON schema.
+         */
+        pomodoro =
+            cJSON_GetObjectItemCaseSensitive(
+                root,
+                "pomo"
+            );
+    }
+
+    if (cJSON_IsObject(pomodoro))
+    {
+        pomodoro_set_config(
+            parse_pomodoro_config(
+                pomodoro
+            )
         );
     }
 
