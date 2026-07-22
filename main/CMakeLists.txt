@@ -9,12 +9,15 @@ idf_component_register(
         "rtc_ds3231.cpp"
          "pomodoro.cpp"
         "acknowledgement_input.cpp"
+        "audio_manager.cpp"
+        "dfplayer.cpp"
 
     INCLUDE_DIRS
         "."
 
     REQUIRES
         esp_driver_spi
+        esp_driver_uart
         esp_lcd
         esp_timer
         driver

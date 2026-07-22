@@ -11,6 +11,7 @@
 #include "images/frost_logo.h"
 #include "images/clock_bg.h"
 #include "images/font.h"
+#include "images/font_regular.h"
 #include "images/drinkwater1.h"
 #include "images/image_time_to_stretch_inverted.h"
 #include "images/rule.h"
@@ -30,12 +31,12 @@ static const char *TAG = "FROST_DISPLAY";
 #define DISPLAY_WIDTH  240
 #define DISPLAY_HEIGHT 240
 
-#define DISPLAY_SCLK_PIN GPIO_NUM_14
-#define DISPLAY_MOSI_PIN GPIO_NUM_13
-#define DISPLAY_MISO_PIN GPIO_NUM_12
-#define DISPLAY_DC_PIN   GPIO_NUM_15
-#define DISPLAY_CS_PIN   GPIO_NUM_5
-#define DISPLAY_RST_PIN  GPIO_NUM_18
+#define DISPLAY_SCLK_PIN GPIO_NUM_12
+#define DISPLAY_MOSI_PIN GPIO_NUM_11
+#define DISPLAY_MISO_PIN GPIO_NUM_NC
+#define DISPLAY_DC_PIN   GPIO_NUM_13
+#define DISPLAY_CS_PIN   GPIO_NUM_10
+#define DISPLAY_RST_PIN  GPIO_NUM_4
 
 /* =========================================================
  * Clock layout
@@ -414,10 +415,13 @@ static void draw_wrapped_reminder_text(
         label
     );
 
-    const int16_t line_height =
-        static_cast<int16_t>(
-            12 * final_text_size
-        );
+    int16_t line_height =
+        static_cast<int16_t>(screen.fontHeight());
+
+    if (line_height <= 0)
+    {
+        line_height = static_cast<int16_t>(12 * final_text_size);
+    }
 
     int16_t current_y = text_y;
 
@@ -636,17 +640,23 @@ void display_show_medication_reminder(
     );
 
     /*
-     * Draw medicine name over the background.
+     * Match the custom-reminder and Arduino UI by using
+     * font_regular for medication labels as well.
      */
+    screen.loadFont(font_regular);
+    screen.setTextSize(1);
+
     draw_configured_reminder_text(
         label,
         text_x,
         text_y,
-        text_size,
+        1,
         text_color,
         text_align,
         text_width
     );
+
+    screen.unloadFont();
 
     /*
      * Send completed sprite to the display.
@@ -704,17 +714,23 @@ void display_show_custom_reminder(
     );
 
     /*
-     * Draw custom reminder label over the background.
+     * Match the Arduino custom-reminder UI by using font_regular.
+     * The wrapped-text helper now uses the font's actual height.
      */
+    screen.loadFont(font_regular);
+    screen.setTextSize(1);
+
     draw_configured_reminder_text(
         label,
         text_x,
         text_y,
-        text_size,
+        1,
         text_color,
         text_align,
         text_width
     );
+
+    screen.unloadFont();
 
     /*
      * Push completed sprite.

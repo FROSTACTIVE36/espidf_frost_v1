@@ -9,6 +9,7 @@
 
 #include "display.hpp"
 #include "reminder_engine.hpp"
+#include "audio_manager.hpp"
 
 static const char* TAG = "POMODORO";
 
@@ -203,6 +204,20 @@ static void begin_stage(
             duration_seconds
         )
     );
+
+    /*
+     * Play the stage announcement first. The audio manager waits
+     * for the DFPlayer BUSY pin to go LOW and then HIGH before
+     * starting the configured Pomodoro background playlist.
+     */
+    if (new_state == PomodoroState::FOCUS)
+    {
+        audio_manager_start_pomodoro_focus();
+    }
+    else if (new_state == PomodoroState::BREAK)
+    {
+        audio_manager_start_pomodoro_break();
+    }
 }
 
 /* =========================================================
@@ -369,6 +384,12 @@ void pomodoro_stop()
             "Pomodoro stopped"
         );
     }
+
+    /*
+     * Stop Pomodoro announcement/background playback. If a healing
+     * schedule is active, audio_manager_update() can resume healing.
+     */
+    audio_manager_stop_pomodoro();
 
     pomodoro_running = false;
 

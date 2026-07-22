@@ -13,6 +13,7 @@
 #include "nvs_flash.h"
 
 #include "acknowledgement_input.hpp"
+#include "audio_manager.hpp"
 #include "bluetooth.hpp"
 #include "config_parser.hpp"
 #include "display.hpp"
@@ -244,6 +245,35 @@ static const char* REMINDER_JSON = R"json(
     }
   },
 
+  "audio": {
+    "volume": 20,
+    "pomodoro": {
+      "enabled": true,
+      "tracks": [20, 21]
+    },
+    "healing": {
+      "enabled": true,
+      "tracks": [18]
+    },
+    "healing_schedules": [
+      {
+        "enabled": true,
+        "start_time": "06:00",
+        "end_time": "07:00"
+      },
+      {
+        "enabled": true,
+        "start_time": "12:30",
+        "end_time": "13:00"
+      },
+      {
+        "enabled": true,
+        "start_time": "21:00",
+        "end_time": "21:30"
+      }
+    ]
+  },
+
   "pomodoro": {
     "enabled": true,
 
@@ -308,6 +338,20 @@ static void on_reminder_triggered(
         item_index,
         schedule_index
     );
+
+    /*
+     * Meditation uses track 22 as looping background music for the
+     * complete meditation reminder duration. Other reminder types
+     * use their normal announcement tone.
+     */
+    if (type == ReminderType::MEDITATION)
+    {
+        audio_manager_start_meditation();
+    }
+    else
+    {
+        audio_manager_play_reminder(type);
+    }
 
     switch (type)
     {
@@ -514,6 +558,11 @@ static void on_reminder_finished(
         item_index,
         schedule_index
     );
+
+    if (type == ReminderType::MEDITATION)
+    {
+        audio_manager_stop_meditation();
+    }
 
     /*
      * A reminder may have covered the Pomodoro break screen.
@@ -1134,10 +1183,44 @@ extern "C" void app_main()
         return;
     }
 
+    /*
+     * Keep the FROST logo visible while the DFPlayer starts.
+     * Do not send any playback command before audio_manager_init().
+     */
     display_show_frost_logo();
 
+    /* -----------------------------------------------------
+     * Initialize DFPlayer/audio manager
+     * ----------------------------------------------------- */
+
+    const esp_err_t audio_result =
+        audio_manager_init();
+
+    if (audio_result != ESP_OK)
+    {
+        ESP_LOGE(
+            TAG,
+            "Audio initialization failed: %s",
+            esp_err_to_name(audio_result)
+        );
+    }
+    else
+    {
+        /*
+         * Play /mp3/0001.mp3 while the FROST logo is visible.
+         */
+        vTaskDelay(
+            pdMS_TO_TICKS(200)
+        );
+
+        audio_manager_play_welcome();
+    }
+
+    /*
+     * Keep the startup logo visible long enough for the welcome note.
+     */
     vTaskDelay(
-        pdMS_TO_TICKS(2000)
+        pdMS_TO_TICKS(2500)
     );
 
     /* -----------------------------------------------------
@@ -1236,6 +1319,11 @@ extern "C" void app_main()
          */
         acknowledgement_input_update();
         update_pomodoro_double_tap();
+
+        /*
+         * Advances background playlists and reads DFPlayer status.
+         */
+        audio_manager_update(now);
 
         const bool pomodoro_focus_active =
             pomodoro_is_running() &&

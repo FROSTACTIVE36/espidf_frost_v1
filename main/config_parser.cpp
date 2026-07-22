@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 #include "pomodoro.hpp"
+#include "audio_manager.hpp"
 
 #include "cJSON.h"
 #include "esp_log.h"
@@ -1008,6 +1009,305 @@ const cJSON* events =
 }
 
 /* =========================================================
+ * Audio configuration parser
+ * ========================================================= */
+
+static AudioPlaylistConfig parse_audio_playlist(
+    const cJSON* playlist_json,
+    const AudioPlaylistConfig& defaults
+)
+{
+    AudioPlaylistConfig config = defaults;
+
+    if (!cJSON_IsObject(playlist_json))
+    {
+        return config;
+    }
+
+    config.enabled =
+        get_bool(
+            playlist_json,
+            "enabled",
+            config.enabled
+        );
+
+    const cJSON* tracks =
+        cJSON_GetObjectItemCaseSensitive(
+            playlist_json,
+            "tracks"
+        );
+
+    if (!cJSON_IsArray(tracks))
+    {
+        return config;
+    }
+
+    /*
+     * Supplying a tracks array replaces the previous/default list.
+     */
+    config.track_count = 0;
+
+    const cJSON* track_json = nullptr;
+
+    cJSON_ArrayForEach(track_json, tracks)
+    {
+        if (
+            config.track_count >=
+            MAX_AUDIO_PLAYLIST_TRACKS
+        )
+        {
+            break;
+        }
+
+        if (!cJSON_IsNumber(track_json))
+        {
+            continue;
+        }
+
+        const int track = track_json->valueint;
+
+        if (track < 1 || track > 65535)
+        {
+            continue;
+        }
+
+        config.tracks[config.track_count] =
+            static_cast<uint16_t>(track);
+
+        ++config.track_count;
+    }
+
+    return config;
+}
+
+static void parse_hhmm(
+    const cJSON* object,
+    const char* key,
+    uint8_t& hour,
+    uint8_t& minute
+)
+{
+    const cJSON* value =
+        cJSON_GetObjectItemCaseSensitive(
+            object,
+            key
+        );
+
+    if (!cJSON_IsString(value) || value->valuestring == nullptr)
+    {
+        return;
+    }
+
+    int parsed_hour = -1;
+    int parsed_minute = -1;
+
+    if (
+        sscanf(
+            value->valuestring,
+            "%d:%d",
+            &parsed_hour,
+            &parsed_minute
+        ) != 2
+    )
+    {
+        return;
+    }
+
+    if (
+        parsed_hour < 0 ||
+        parsed_hour > 23 ||
+        parsed_minute < 0 ||
+        parsed_minute > 59
+    )
+    {
+        return;
+    }
+
+    hour = static_cast<uint8_t>(parsed_hour);
+    minute = static_cast<uint8_t>(parsed_minute);
+}
+
+static AudioManagerConfig parse_audio_config(
+    const cJSON* audio_json
+)
+{
+    AudioManagerConfig config =
+        audio_manager_get_config();
+
+    if (!cJSON_IsObject(audio_json))
+    {
+        return config;
+    }
+
+    int volume =
+        get_int(
+            audio_json,
+            "volume",
+            config.volume
+        );
+
+    if (volume < 0)
+    {
+        volume = 0;
+    }
+    else if (volume > 30)
+    {
+        volume = 30;
+    }
+
+    config.volume =
+        static_cast<uint8_t>(volume);
+
+    config.pomodoro =
+        parse_audio_playlist(
+            cJSON_GetObjectItemCaseSensitive(
+                audio_json,
+                "pomodoro"
+            ),
+            config.pomodoro
+        );
+
+    /*
+     * Accept both "healing" and the common misspelling "heling".
+     */
+    const cJSON* healing =
+        cJSON_GetObjectItemCaseSensitive(
+            audio_json,
+            "healing"
+        );
+
+    if (!cJSON_IsObject(healing))
+    {
+        healing =
+            cJSON_GetObjectItemCaseSensitive(
+                audio_json,
+                "heling"
+            );
+    }
+
+    config.healing =
+        parse_audio_playlist(
+            healing,
+            config.healing
+        );
+
+    /*
+     * Preferred format:
+     *
+     * "healing_schedules": [
+     *   {
+     *     "enabled": true,
+     *     "start_time": "06:00",
+     *     "end_time": "07:00"
+     *   }
+     * ]
+     *
+     * The older single-object key "healing_schedule" is also accepted.
+     */
+    const cJSON* healing_schedules =
+        cJSON_GetObjectItemCaseSensitive(
+            audio_json,
+            "healing_schedules"
+        );
+
+    if (cJSON_IsArray(healing_schedules))
+    {
+        config.healing_schedule_count = 0;
+
+        const cJSON* schedule_json = nullptr;
+
+        cJSON_ArrayForEach(
+            schedule_json,
+            healing_schedules
+        )
+        {
+            if (
+                config.healing_schedule_count >=
+                MAX_HEALING_SCHEDULES
+            )
+            {
+                break;
+            }
+
+            if (!cJSON_IsObject(schedule_json))
+            {
+                continue;
+            }
+
+            HealingScheduleConfig schedule = {};
+
+            schedule.enabled =
+                get_bool(
+                    schedule_json,
+                    "enabled",
+                    true
+                );
+
+            parse_hhmm(
+                schedule_json,
+                "start_time",
+                schedule.start_hour,
+                schedule.start_minute
+            );
+
+            parse_hhmm(
+                schedule_json,
+                "end_time",
+                schedule.end_hour,
+                schedule.end_minute
+            );
+
+            config.healing_schedules[
+                config.healing_schedule_count
+            ] = schedule;
+
+            ++config.healing_schedule_count;
+        }
+    }
+    else
+    {
+        const cJSON* healing_schedule =
+            cJSON_GetObjectItemCaseSensitive(
+                audio_json,
+                "healing_schedule"
+            );
+
+        if (cJSON_IsObject(healing_schedule))
+        {
+            HealingScheduleConfig schedule = {};
+
+            schedule.enabled =
+                get_bool(
+                    healing_schedule,
+                    "enabled",
+                    true
+                );
+
+            parse_hhmm(
+                healing_schedule,
+                "start_time",
+                schedule.start_hour,
+                schedule.start_minute
+            );
+
+            parse_hhmm(
+                healing_schedule,
+                "end_time",
+                schedule.end_hour,
+                schedule.end_minute
+            );
+
+            config.healing_schedules[0] =
+                schedule;
+
+            config.healing_schedule_count = 1;
+        }
+    }
+
+    return config;
+}
+
+/* =========================================================
  * Pomodoro configuration parser
  * ========================================================= */
 
@@ -1455,6 +1755,28 @@ bool reminder_config_parse_and_apply(
 
 
         /*
+     * Audio playlists are configured at the root level.
+     *
+     * "audio": {
+     *   "volume": 20,
+     *   "pomodoro": {"enabled": true, "tracks": [50, 51]},
+     *   "healing":  {"enabled": true, "tracks": [60, 61]}
+     * }
+     */
+    const cJSON* audio =
+        cJSON_GetObjectItemCaseSensitive(
+            root,
+            "audio"
+        );
+
+    if (cJSON_IsObject(audio))
+    {
+        audio_manager_set_config(
+            parse_audio_config(audio)
+        );
+    }
+
+    /*
      * Pomodoro is at the root level, not inside reminders.
      */
     const cJSON* pomodoro =
