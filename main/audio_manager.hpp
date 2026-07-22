@@ -21,6 +21,9 @@ struct HealingScheduleConfig
 {
     bool enabled = false;
 
+    // Bit 0=Sun ... bit 6=Sat. Zero means every day.
+    uint8_t day_mask = 0;
+
     uint8_t start_hour = 0;
     uint8_t start_minute = 0;
 
@@ -34,6 +37,9 @@ struct AudioManagerConfig
     AudioPlaylistConfig pomodoro = {};
     AudioPlaylistConfig meditation = {};
     AudioPlaylistConfig healing = {};
+
+    // When true, healing runs only while the IR sensor reports docked.
+    bool healing_require_dock = false;
 
     HealingScheduleConfig healing_schedules[MAX_HEALING_SCHEDULES] = {};
     std::size_t healing_schedule_count = 0;
@@ -66,6 +72,8 @@ void audio_manager_stop_meditation();
 
 void audio_manager_start_healing();
 void audio_manager_stop_healing();
+void audio_manager_set_dock_state(bool docked);
+bool audio_manager_is_docked();
 void audio_manager_play_welcome();
 void audio_manager_play_reminder(ReminderType type);
 

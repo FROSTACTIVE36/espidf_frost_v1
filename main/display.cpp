@@ -21,6 +21,7 @@
 #include "images/meditation.h"
 #include "images/pomodoro_focus_bg.h"
 #include "images/pomodoro_break_bg.h"
+#include "images/hydration_consumption.h"
 
 static const char *TAG = "FROST_DISPLAY";
 
@@ -157,7 +158,7 @@ bool display_init()
         return false;
     }
 
-    display.setRotation(0);
+    display.setRotation(2);
     display.setSwapBytes(true);
     display.fillScreen(TFT_BLACK);
 
@@ -1029,6 +1030,240 @@ void display_show_home_clock(time_t current_time)
     screen.unloadFont();
 
     // Push completed frame
+    display.startWrite();
+    screen.pushSprite(0, 0);
+    display.endWrite();
+}
+
+/* =========================================================
+ * Bottle calibration full-screen wizard
+ * ========================================================= */
+
+static void draw_calibration_screen(
+    const char* heading,
+    const char* line1,
+    const char* line2
+)
+{
+    if (!display_ready || !sprite_ready)
+    {
+        return;
+    }
+
+    screen.fillSprite(TFT_BLACK);
+
+    screen.setTextDatum(lgfx::textdatum_t::middle_center);
+    screen.setTextColor(TFT_WHITE);
+    screen.setTextSize(2);
+
+    screen.drawString(
+        heading != nullptr ? heading : "",
+        120,
+        65
+    );
+
+    screen.setTextSize(1);
+    screen.setTextColor(TFT_CYAN);
+
+    screen.drawString(
+        line1 != nullptr ? line1 : "",
+        120,
+        120
+    );
+
+    screen.setTextColor(TFT_WHITE);
+
+    screen.drawString(
+        line2 != nullptr ? line2 : "",
+        120,
+        150
+    );
+
+    screen.drawCircle(120, 120, 112, TFT_DARKGREY);
+
+    display.startWrite();
+    screen.pushSprite(0, 0);
+    display.endWrite();
+}
+
+void display_show_calibration_remove_bottle()
+{
+    draw_calibration_screen(
+        "CALIBRATION",
+        "REMOVE BOTTLE",
+        "Preparing tare"
+    );
+}
+
+void display_show_calibration_place_empty()
+{
+    draw_calibration_screen(
+        "CALIBRATION",
+        "PLACE EMPTY BOTTLE",
+        "Keep it on the dock"
+    );
+}
+
+void display_show_calibration_fill_bottle()
+{
+    draw_calibration_screen(
+        "CALIBRATION",
+        "REMOVE AND FILL",
+        "Fill bottle completely"
+    );
+}
+
+void display_show_calibration_place_full()
+{
+    draw_calibration_screen(
+        "CALIBRATION",
+        "PLACE FULL BOTTLE",
+        "Keep it on the dock"
+    );
+}
+
+void display_show_calibration_measuring(
+    const char* title,
+    const char* subtitle
+)
+{
+    draw_calibration_screen(
+        "MEASURING",
+        title,
+        subtitle
+    );
+}
+
+void display_show_calibration_complete(float capacity_ml)
+{
+    char capacity[48] = {};
+
+    std::snprintf(
+        capacity,
+        sizeof(capacity),
+        "Capacity: %.0f ml",
+        capacity_ml
+    );
+
+    draw_calibration_screen(
+        "COMPLETE",
+        capacity,
+        "Tracking is ready"
+    );
+}
+
+void display_show_calibration_error(const char* message)
+{
+    draw_calibration_screen(
+        "CALIBRATION",
+        "ERROR",
+        message != nullptr ? message : "Try again"
+    );
+}
+
+
+/* =========================================================
+ * Separate hydration consumption screen
+ * ========================================================= */
+
+void display_show_consumption_screen(
+    uint32_t consumed_ml,
+    uint32_t daily_consumed_ml,
+    uint32_t daily_goal_ml
+)
+{
+    if (!display_ready || !sprite_ready)
+    {
+        return;
+    }
+
+    /*
+     * Draw the dedicated 240 x 240 consumption background first.
+     * The image header must expose:
+     *
+     *     hydration_consumption_data
+     */
+    screen.setSwapBytes(true);
+
+    screen.pushImage(
+        0,
+        0,
+        DISPLAY_WIDTH,
+        DISPLAY_HEIGHT,
+        hydration_consumption_data
+    );
+
+    char consumed_text[24] = {};
+    char today_text[40] = {};
+
+    std::snprintf(
+        consumed_text,
+        sizeof(consumed_text),
+        "%lu ml",
+        static_cast<unsigned long>(consumed_ml)
+    );
+
+    std::snprintf(
+        today_text,
+        sizeof(today_text),
+        "%lu / %lu ml",
+        static_cast<unsigned long>(daily_consumed_ml),
+        static_cast<unsigned long>(daily_goal_ml)
+    );
+
+    /*
+     * Consumption screen layout is intentionally hard-coded so it does not
+     * depend on JSON styling or reminder configuration.
+     */
+    static constexpr int16_t CONSUMED_LABEL_X = 120;
+    static constexpr int16_t CONSUMED_LABEL_Y = 84;
+    static constexpr int16_t CONSUMED_VALUE_X = 120;
+    static constexpr int16_t CONSUMED_VALUE_Y = 116;
+    static constexpr int16_t TODAY_LABEL_X = 120;
+    static constexpr int16_t TODAY_LABEL_Y = 157;
+    static constexpr int16_t TODAY_VALUE_X = 120;
+    static constexpr int16_t TODAY_VALUE_Y = 185;
+
+    static constexpr uint16_t CONSUMED_LABEL_COLOR = 0; // White
+    static constexpr uint16_t CONSUMED_VALUE_COLOR = 0; // Cyan-blue
+    static constexpr uint16_t TODAY_LABEL_COLOR = 0;    // White
+    static constexpr uint16_t TODAY_VALUE_COLOR = 0;    // Yellow
+
+    screen.loadFont(font_regular);
+    screen.setTextDatum(lgfx::textdatum_t::middle_center);
+    screen.setTextSize(1);
+
+    /* Transparent text keeps the background image visible. */
+    screen.setTextColor(CONSUMED_LABEL_COLOR);
+    screen.drawString(
+        "Consumed",
+        CONSUMED_LABEL_X,
+        CONSUMED_LABEL_Y
+    );
+
+    screen.setTextColor(CONSUMED_VALUE_COLOR);
+    screen.drawString(
+        consumed_text,
+        CONSUMED_VALUE_X,
+        CONSUMED_VALUE_Y
+    );
+
+    screen.setTextColor(TODAY_LABEL_COLOR);
+    screen.drawString(
+        "Today",
+        TODAY_LABEL_X,
+        TODAY_LABEL_Y
+    );
+
+    screen.setTextColor(TODAY_VALUE_COLOR);
+    screen.drawString(
+        today_text,
+        TODAY_VALUE_X,
+        TODAY_VALUE_Y
+    );
+
+    screen.unloadFont();
+
     display.startWrite();
     screen.pushSprite(0, 0);
     display.endWrite();

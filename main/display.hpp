@@ -53,3 +53,29 @@ void display_show_pomodoro_break(
     uint32_t total_seconds,
     const PomodoroCounterStyle& style
 );
+
+/* Full-screen bottle calibration wizard. */
+void display_show_calibration_remove_bottle();
+void display_show_calibration_place_empty();
+void display_show_calibration_fill_bottle();
+void display_show_calibration_place_full();
+
+void display_show_calibration_measuring(
+    const char* title,
+    const char* subtitle
+);
+
+void display_show_calibration_complete(
+    float capacity_ml
+);
+
+void display_show_calibration_error(
+    const char* message
+);
+
+/* Separate hydration consumption result screen. */
+void display_show_consumption_screen(
+    uint32_t consumed_ml,
+    uint32_t daily_consumed_ml,
+    uint32_t daily_goal_ml
+);

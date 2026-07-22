@@ -7,6 +7,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "driver/gpio.h"
+
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -22,12 +24,36 @@
 #include "reminder_types.hpp"
 #include "rtc_ds3231.hpp"
 #include "configuration_storage.hpp"
+#include "scale.hpp"
+#include "bottle_calibration.hpp"
+#include "consumption_tracker.hpp"
 
 /* =========================================================
  * Logging
  * ========================================================= */
 
 static const char* TAG = "FROST_MAIN";
+
+/* =========================================================
+ * Shared IR sensor
+ *
+ * GPIO7 is used for:
+ * 1. Reminder acknowledgement
+ * 2. Pomodoro double-tap gesture
+ * 3. Healing dock-presence gate
+ *
+ * A stable-state filter prevents short gestures from changing
+ * the healing dock state.
+ * ========================================================= */
+
+static constexpr gpio_num_t SHARED_IR_PIN = GPIO_NUM_7;
+static constexpr bool SHARED_IR_ACTIVE_LOW = true;
+static constexpr uint64_t DOCK_STABLE_TIME_MS = 1200;
+
+static bool dock_filter_initialized = false;
+static bool dock_candidate_state = false;
+static bool dock_reported_state = false;
+static uint64_t dock_candidate_since_ms = 0;
 
 
 /* =========================================================
@@ -44,6 +70,80 @@ static uint64_t application_millis()
 {
     return static_cast<uint64_t>(
         esp_timer_get_time() / 1000ULL
+    );
+}
+
+
+static bool read_shared_ir_docked()
+{
+    const int level = gpio_get_level(SHARED_IR_PIN);
+
+    return SHARED_IR_ACTIVE_LOW
+        ? level == 0
+        : level == 1;
+}
+
+static void initialize_shared_ir_dock_state()
+{
+    const bool current_docked = read_shared_ir_docked();
+
+    dock_filter_initialized = true;
+    dock_candidate_state = current_docked;
+    dock_reported_state = current_docked;
+    dock_candidate_since_ms = application_millis();
+
+    audio_manager_set_dock_state(current_docked);
+    bottle_calibration_set_docked(current_docked);
+    consumption_tracker_set_docked(current_docked);
+
+    ESP_LOGI(
+        TAG,
+        "Initial shared IR dock state: %s",
+        current_docked ? "DOCKED" : "UNDOCKED"
+    );
+}
+
+static void update_shared_ir_dock_state()
+{
+    const uint64_t current_ms = application_millis();
+    const bool sampled_docked = read_shared_ir_docked();
+
+    if (!dock_filter_initialized)
+    {
+        initialize_shared_ir_dock_state();
+        return;
+    }
+
+    if (sampled_docked != dock_candidate_state)
+    {
+        dock_candidate_state = sampled_docked;
+        dock_candidate_since_ms = current_ms;
+        return;
+    }
+
+    if (dock_candidate_state == dock_reported_state)
+    {
+        return;
+    }
+
+    if (
+        current_ms - dock_candidate_since_ms <
+        DOCK_STABLE_TIME_MS
+    )
+    {
+        return;
+    }
+
+    dock_reported_state = dock_candidate_state;
+
+    audio_manager_set_dock_state(dock_reported_state);
+    bottle_calibration_set_docked(dock_reported_state);
+    consumption_tracker_set_docked(dock_reported_state);
+
+    ESP_LOGI(
+        TAG,
+        "Stable shared IR dock state: %s",
+        dock_reported_state ? "DOCKED" : "UNDOCKED"
     );
 }
 
@@ -253,23 +353,27 @@ static const char* REMINDER_JSON = R"json(
     },
     "healing": {
       "enabled": true,
-      "tracks": [18]
+      "require_dock": true,
+      "tracks": [60, 61, 62]
     },
     "healing_schedules": [
       {
         "enabled": true,
         "start_time": "06:00",
-        "end_time": "07:00"
+        "end_time": "07:00",
+        "days": ["mon", "tue", "wed", "thu", "fri"]
       },
       {
         "enabled": true,
         "start_time": "12:30",
-        "end_time": "13:00"
+        "end_time": "13:00",
+        "days": ["sat", "sun"]
       },
       {
         "enabled": true,
         "start_time": "21:00",
-        "end_time": "21:30"
+        "end_time": "21:30",
+        "days": []
       }
     ]
   },
@@ -1170,6 +1274,33 @@ extern "C" void app_main()
     }
 
     /* -----------------------------------------------------
+     * Initialize HX711 scale and bottle calibration
+     * ----------------------------------------------------- */
+
+    const esp_err_t scale_result = scale_init();
+
+    if (scale_result != ESP_OK)
+    {
+        ESP_LOGE(
+            TAG,
+            "Scale initialization failed: %s",
+            esp_err_to_name(scale_result)
+        );
+    }
+
+    bottle_calibration_init();
+
+    const esp_err_t consumption_result = consumption_tracker_init();
+    if (consumption_result != ESP_OK)
+    {
+        ESP_LOGE(
+            TAG,
+            "Consumption tracker initialization failed: %s",
+            esp_err_to_name(consumption_result)
+        );
+    }
+
+    /* -----------------------------------------------------
      * Initialize display
      * ----------------------------------------------------- */
 
@@ -1251,7 +1382,7 @@ extern "C" void app_main()
     AcknowledgementInputConfig acknowledgement_config;
 
     acknowledgement_config.gpio =
-        GPIO_NUM_7;
+        SHARED_IR_PIN;
 
     acknowledgement_config.active_low =
         true;
@@ -1274,6 +1405,10 @@ extern "C" void app_main()
                 acknowledgement_error
             )
         );
+    }
+    else
+    {
+        initialize_shared_ir_dock_state();
     }
 
     /* -----------------------------------------------------
@@ -1321,9 +1456,35 @@ extern "C" void app_main()
         update_pomodoro_double_tap();
 
         /*
-         * Advances background playlists and reads DFPlayer status.
+         * The same IR sensor also acts as the healing dock sensor.
+         * Short acknowledgement/Pomodoro gestures are ignored by
+         * the 1200 ms dock stability filter.
+         */
+        update_shared_ir_dock_state();
+
+        /*
+         * Calibration consumes HX711 readings and owns the complete
+         * display while active.
+         */
+        bottle_calibration_update();
+
+        const bool calibration_active = bottle_calibration_is_active();
+        consumption_tracker_set_enabled(!calibration_active);
+        consumption_tracker_set_docked(dock_reported_state);
+        consumption_tracker_update();
+
+        /*
+         * Keep audio servicing active, but the normal reminder,
+         * Pomodoro and home-screen rendering below are suspended
+         * during calibration.
          */
         audio_manager_update(now);
+
+        if (calibration_active)
+        {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
 
         const bool pomodoro_focus_active =
             pomodoro_is_running() &&
@@ -1365,22 +1526,23 @@ extern "C" void app_main()
          * Display priority:
          *
          * 1. Active reminder
-         * 2. Pomodoro focus/break screen
-         * 3. Home clock
+         * 2. Consumption result screen
+         * 3. Pomodoro focus/break screen
+         * 4. Home clock
          */
-        if (
-            !reminder_engine_has_active_reminder()
-        )
+        if (!reminder_engine_has_active_reminder())
         {
-            if (pomodoro_is_running())
+            if (consumption_tracker_screen_active())
+            {
+                consumption_tracker_render_screen();
+            }
+            else if (pomodoro_is_running())
             {
                 pomodoro_render_if_needed();
             }
             else
             {
-                display_show_home_clock(
-                    now
-                );
+                display_show_home_clock(now);
             }
         }
 

@@ -24,6 +24,7 @@
 
 #include "rtc_ds3231.hpp"
 #include "pomodoro.hpp"
+#include "bottle_calibration.hpp"
 
 
 static const char *TAG = "FROST_BLE";
@@ -463,6 +464,35 @@ static bool process_ble_command(
             "OK:JSON_CANCELLED"
         );
 
+        return true;
+    }
+
+
+    if (strcmp(command, "BOTTLE:LEARN_START") == 0)
+    {
+        const bool started = bottle_calibration_start();
+
+        set_ble_status(
+            started
+                ? "OK:BOTTLE_LEARN_STARTED"
+                : "ERROR:BOTTLE_LEARN_START"
+        );
+
+        return started;
+    }
+
+    if (strcmp(command, "BOTTLE:LEARN_CANCEL") == 0)
+    {
+        bottle_calibration_cancel();
+        set_ble_status("OK:BOTTLE_LEARN_CANCELLED");
+        return true;
+    }
+
+    if (strcmp(command, "BOTTLE:STATUS") == 0)
+    {
+        char response[128] = {};
+        bottle_calibration_get_status(response, sizeof(response));
+        set_ble_status(response);
         return true;
     }
 

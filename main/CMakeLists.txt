@@ -11,6 +11,11 @@ idf_component_register(
         "acknowledgement_input.cpp"
         "audio_manager.cpp"
         "dfplayer.cpp"
+        "hx711.cpp"
+        "scale.cpp"
+        "bottle_calibration.cpp"
+        "consumption_tracker.cpp"
+       
 
     INCLUDE_DIRS
         "."

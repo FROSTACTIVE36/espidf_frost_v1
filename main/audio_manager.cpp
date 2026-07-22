@@ -34,9 +34,11 @@ AudioManagerConfig audio_config = {
         .tracks = {60, 61, 62},
         .track_count = 3
     },
+    .healing_require_dock = false,
     .healing_schedules = {
         {
             .enabled = false,
+            .day_mask = 0,
             .start_hour = 6,
             .start_minute = 0,
             .end_hour = 7,
@@ -89,6 +91,9 @@ bool background_announcement_pending = false;
 bool announcement_saw_busy_low = false;
 uint16_t pending_announcement_track = 0;
 int64_t announcement_command_ms = 0;
+
+bool dock_is_present = false;
+bool healing_paused_for_undock = false;
 
 void stop_background(AudioBackgroundMode mode);
 
@@ -370,6 +375,61 @@ bool minute_is_inside_window(
         current_minute < end_minute;
 }
 
+bool day_mask_allows(uint8_t mask, int weekday)
+{
+    if (mask == 0)
+    {
+        return true;
+    }
+
+    return
+        weekday >= 0 &&
+        weekday <= 6 &&
+        (mask & static_cast<uint8_t>(1U << weekday)) != 0;
+}
+
+bool healing_schedule_matches(
+    const HealingScheduleConfig& schedule,
+    const struct tm& local_time
+)
+{
+    const int current =
+        local_time.tm_hour * 60 + local_time.tm_min;
+
+    const int start =
+        schedule.start_hour * 60 + schedule.start_minute;
+
+    const int end =
+        schedule.end_hour * 60 + schedule.end_minute;
+
+    if (start == end)
+    {
+        return day_mask_allows(schedule.day_mask, local_time.tm_wday);
+    }
+
+    if (start < end)
+    {
+        return
+            current >= start &&
+            current < end &&
+            day_mask_allows(schedule.day_mask, local_time.tm_wday);
+    }
+
+    // Overnight: after midnight belongs to the previous day's schedule.
+    if (current >= start)
+    {
+        return day_mask_allows(schedule.day_mask, local_time.tm_wday);
+    }
+
+    if (current < end)
+    {
+        const int previous_day = (local_time.tm_wday + 6) % 7;
+        return day_mask_allows(schedule.day_mask, previous_day);
+    }
+
+    return false;
+}
+
 int active_healing_schedule_index(time_t now)
 {
     if (
@@ -388,10 +448,6 @@ int active_healing_schedule_index(time_t now)
         return -1;
     }
 
-    const int current_minute =
-        local_time.tm_hour * 60 +
-        local_time.tm_min;
-
     for (
         std::size_t index = 0;
         index < audio_config.healing_schedule_count;
@@ -406,21 +462,7 @@ int active_healing_schedule_index(time_t now)
             continue;
         }
 
-        const int start_minute =
-            schedule.start_hour * 60 +
-            schedule.start_minute;
-
-        const int end_minute =
-            schedule.end_hour * 60 +
-            schedule.end_minute;
-
-        if (
-            minute_is_inside_window(
-                current_minute,
-                start_minute,
-                end_minute
-            )
-        )
+        if (healing_schedule_matches(schedule, local_time))
         {
             return static_cast<int>(index);
         }
@@ -434,35 +476,58 @@ void update_healing_schedule(time_t now)
     const int schedule_index =
         active_healing_schedule_index(now);
 
-    const bool should_play =
-        schedule_index >= 0;
-
-    if (should_play)
+    if (schedule_index < 0)
     {
-        /*
-         * Pomodoro has priority while it is active. Healing will
-         * automatically resume after Pomodoro exits, provided the
-         * current time remains inside the configured window.
-         */
-        if (background_mode == AudioBackgroundMode::NONE)
-        {
-            ESP_LOGI(
-                TAG,
-                "Healing schedule %d is active",
-                schedule_index
-            );
+        healing_paused_for_undock = false;
 
-            audio_manager_start_healing();
+        if (background_mode == AudioBackgroundMode::HEALING)
+        {
+            stop_background(AudioBackgroundMode::HEALING);
         }
 
         return;
     }
 
-    if (background_mode == AudioBackgroundMode::HEALING)
+    const bool dock_allowed =
+        !audio_config.healing_require_dock ||
+        dock_is_present;
+
+    if (!dock_allowed)
     {
-        stop_background(
-            AudioBackgroundMode::HEALING
+        if (
+            background_mode == AudioBackgroundMode::HEALING &&
+            !healing_paused_for_undock
+        )
+        {
+            ESP_LOGI(TAG, "Healing paused: dock required and undocked");
+            dfplayer_pause();
+            healing_paused_for_undock = true;
+        }
+
+        return;
+    }
+
+    if (healing_paused_for_undock)
+    {
+        if (background_mode == AudioBackgroundMode::HEALING)
+        {
+            ESP_LOGI(TAG, "Healing resumed: dock detected");
+            dfplayer_resume();
+        }
+
+        healing_paused_for_undock = false;
+        return;
+    }
+
+    if (background_mode == AudioBackgroundMode::NONE)
+    {
+        ESP_LOGI(
+            TAG,
+            "Healing schedule %d active; day/dock gates passed",
+            schedule_index
         );
+
+        audio_manager_start_healing();
     }
 }
 
@@ -477,6 +542,7 @@ void stop_background(AudioBackgroundMode mode)
     playlist_index = 0;
     reset_track_detection();
     reset_announcement_detection();
+    healing_paused_for_undock = false;
 
     dfplayer_stop();
     ESP_LOGI(TAG, "Background playback stopped");
@@ -490,6 +556,7 @@ esp_err_t audio_manager_init()
     playlist_index = 0;
     reset_track_detection();
     reset_announcement_detection();
+    healing_paused_for_undock = false;
 
     return dfplayer_init(audio_config.volume);
 }
@@ -519,14 +586,16 @@ void audio_manager_set_config(
     playlist_index = 0;
     reset_track_detection();
     reset_announcement_detection();
+    healing_paused_for_undock = false;
 
     ESP_LOGI(
         TAG,
-        "Audio JSON applied: volume=%u, pomodoro_tracks=%u, meditation_tracks=%u, healing_tracks=%u, healing_schedules=%u",
+        "Audio JSON applied: volume=%u, pomodoro_tracks=%u, meditation_tracks=%u, healing_tracks=%u, require_dock=%d, healing_schedules=%u",
         static_cast<unsigned>(audio_config.volume),
         static_cast<unsigned>(audio_config.pomodoro.track_count),
         static_cast<unsigned>(audio_config.meditation.track_count),
         static_cast<unsigned>(audio_config.healing.track_count),
+        audio_config.healing_require_dock,
         static_cast<unsigned>(audio_config.healing_schedule_count)
     );
 
@@ -764,6 +833,27 @@ void audio_manager_play_reminder(ReminderType type)
     );
 
     dfplayer_play_track(track);
+}
+
+void audio_manager_set_dock_state(bool docked)
+{
+    if (dock_is_present == docked)
+    {
+        return;
+    }
+
+    dock_is_present = docked;
+
+    ESP_LOGI(
+        TAG,
+        "Dock state changed: %s",
+        docked ? "DOCKED" : "UNDOCKED"
+    );
+}
+
+bool audio_manager_is_docked()
+{
+    return dock_is_present;
 }
 
 void audio_manager_play_welcome()

@@ -1191,6 +1191,16 @@ static AudioManagerConfig parse_audio_config(
             config.healing
         );
 
+    if (cJSON_IsObject(healing))
+    {
+        config.healing_require_dock =
+            get_bool(
+                healing,
+                "require_dock",
+                config.healing_require_dock
+            );
+    }
+
     /*
      * Preferred format:
      *
@@ -1243,6 +1253,12 @@ static AudioManagerConfig parse_audio_config(
                     true
                 );
 
+            schedule.day_mask =
+                parse_day_mask(
+                    schedule_json,
+                    "days"
+                );
+
             parse_hhmm(
                 schedule_json,
                 "start_time",
@@ -1281,6 +1297,12 @@ static AudioManagerConfig parse_audio_config(
                     healing_schedule,
                     "enabled",
                     true
+                );
+
+            schedule.day_mask =
+                parse_day_mask(
+                    healing_schedule,
+                    "days"
                 );
 
             parse_hhmm(
