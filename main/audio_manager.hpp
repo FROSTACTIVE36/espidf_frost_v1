@@ -77,4 +77,18 @@ bool audio_manager_is_docked();
 void audio_manager_play_welcome();
 void audio_manager_play_reminder(ReminderType type);
 
+/* Calibration voice prompts stored as /mp3/0020.mp3 to /mp3/0024.mp3. */
+enum class CalibrationAnnouncement : uint8_t
+{
+    REMOVE_BOTTLE,
+    PLACE_EMPTY_BOTTLE,
+    PLACE_FULL_BOTTLE,
+    CALIBRATION_SUCCESS,
+    CALIBRATION_FAILED
+};
+
+void audio_manager_play_calibration_announcement(
+    CalibrationAnnouncement announcement
+);
+
 AudioBackgroundMode audio_manager_get_background_mode();

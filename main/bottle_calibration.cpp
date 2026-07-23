@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "display.hpp"
+#include "audio_manager.hpp"
 #include "consumption_tracker.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -88,6 +89,9 @@ void enter_state(BottleCalibrationState next)
     {
         case BottleCalibrationState::WAIT_REMOVE_FOR_TARE:
             display_show_calibration_remove_bottle();
+            audio_manager_play_calibration_announcement(
+                CalibrationAnnouncement::REMOVE_BOTTLE
+            );
             break;
 
         case BottleCalibrationState::TARING:
@@ -96,6 +100,9 @@ void enter_state(BottleCalibrationState next)
 
         case BottleCalibrationState::WAIT_EMPTY_BOTTLE:
             display_show_calibration_place_empty();
+            audio_manager_play_calibration_announcement(
+                CalibrationAnnouncement::PLACE_EMPTY_BOTTLE
+            );
             break;
 
         case BottleCalibrationState::MEASURE_EMPTY:
@@ -111,6 +118,9 @@ void enter_state(BottleCalibrationState next)
 
         case BottleCalibrationState::WAIT_FULL_BOTTLE:
             display_show_calibration_place_full();
+            audio_manager_play_calibration_announcement(
+                CalibrationAnnouncement::PLACE_FULL_BOTTLE
+            );
             break;
 
         case BottleCalibrationState::MEASURE_FULL:
@@ -124,10 +134,16 @@ void enter_state(BottleCalibrationState next)
             display_show_calibration_complete(
                 working_calibration.capacity_ml
             );
+            audio_manager_play_calibration_announcement(
+                CalibrationAnnouncement::CALIBRATION_SUCCESS
+            );
             break;
 
         case BottleCalibrationState::ERROR:
             display_show_calibration_error("Calibration failed");
+            audio_manager_play_calibration_announcement(
+                CalibrationAnnouncement::CALIBRATION_FAILED
+            );
             break;
 
         case BottleCalibrationState::CANCELLED:

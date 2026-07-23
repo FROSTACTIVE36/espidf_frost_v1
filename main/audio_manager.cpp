@@ -68,6 +68,11 @@ constexpr uint16_t TONE_MEDITATION   = 22;  // /mp3/0022.mp3
 constexpr uint16_t TONE_CUSTOM       = 23;  // /mp3/0023.mp3
 constexpr uint16_t TONE_PLACE_BOTTLE = 24;  // /mp3/0024.mp3
 constexpr uint16_t TONE_ACK          = 30;  // /mp3/0030.mp3
+constexpr uint16_t TONE_CAL_REMOVE_BOTTLE = 20; // /mp3/0020.mp3
+constexpr uint16_t TONE_CAL_EMPTY_BOTTLE  = 21; // /mp3/0021.mp3
+constexpr uint16_t TONE_CAL_FULL_BOTTLE   = 22; // /mp3/0022.mp3
+constexpr uint16_t TONE_CAL_SUCCESS       = 23; // /mp3/0023.mp3
+constexpr uint16_t TONE_CAL_FAILED        = 24; // /mp3/0024.mp3
 
 AudioBackgroundMode background_mode =
     AudioBackgroundMode::NONE;
@@ -854,6 +859,54 @@ void audio_manager_set_dock_state(bool docked)
 bool audio_manager_is_docked()
 {
     return dock_is_present;
+}
+
+void audio_manager_play_calibration_announcement(
+    CalibrationAnnouncement announcement
+)
+{
+    uint16_t track = 0;
+
+    switch (announcement)
+    {
+        case CalibrationAnnouncement::REMOVE_BOTTLE:
+            track = TONE_CAL_REMOVE_BOTTLE;
+            break;
+
+        case CalibrationAnnouncement::PLACE_EMPTY_BOTTLE:
+            track = TONE_CAL_EMPTY_BOTTLE;
+            break;
+
+        case CalibrationAnnouncement::PLACE_FULL_BOTTLE:
+            track = TONE_CAL_FULL_BOTTLE;
+            break;
+
+        case CalibrationAnnouncement::CALIBRATION_SUCCESS:
+            track = TONE_CAL_SUCCESS;
+            break;
+
+        case CalibrationAnnouncement::CALIBRATION_FAILED:
+            track = TONE_CAL_FAILED;
+            break;
+
+        default:
+            return;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "Calibration announcement track=%u",
+        static_cast<unsigned>(track)
+    );
+
+    /* Preserve active background playback by using DFPlayer advertisement mode. */
+    if (background_mode != AudioBackgroundMode::NONE)
+    {
+        dfplayer_play_advertisement(track);
+        return;
+    }
+
+    dfplayer_play_track(track);
 }
 
 void audio_manager_play_welcome()

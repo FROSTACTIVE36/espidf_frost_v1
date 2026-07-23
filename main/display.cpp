@@ -1052,9 +1052,11 @@ static void draw_calibration_screen(
 
     screen.fillSprite(TFT_BLACK);
 
+    /* Use the same embedded font as medication and custom screens. */
+    screen.loadFont(font_regular);
     screen.setTextDatum(lgfx::textdatum_t::middle_center);
     screen.setTextColor(TFT_WHITE);
-    screen.setTextSize(2);
+    screen.setTextSize(1);
 
     screen.drawString(
         heading != nullptr ? heading : "",
@@ -1078,6 +1080,8 @@ static void draw_calibration_screen(
         120,
         150
     );
+
+    screen.unloadFont();
 
     screen.drawCircle(120, 120, 112, TFT_DARKGREY);
 

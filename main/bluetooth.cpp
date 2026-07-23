@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <atomic>
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -73,6 +74,13 @@ static uint8_t own_address_type = 0;
 static uint16_t command_value_handle = 0;
 
 static bool ble_initialized = false;
+
+/*
+ * BLE callbacks run in the NimBLE host task. Calibration changes the display,
+ * so commands are queued here and consumed by the main application task.
+ */
+static std::atomic_bool bottle_calibration_start_requested{false};
+static std::atomic_bool bottle_calibration_cancel_requested{false};
 
 static bluetooth_json_handler_t
     json_configuration_handler = nullptr;
@@ -470,21 +478,27 @@ static bool process_ble_command(
 
     if (strcmp(command, "BOTTLE:LEARN_START") == 0)
     {
-        const bool started = bottle_calibration_start();
+        bool expected = false;
 
-        set_ble_status(
-            started
-                ? "OK:BOTTLE_LEARN_STARTED"
-                : "ERROR:BOTTLE_LEARN_START"
-        );
+        if (!bottle_calibration_start_requested.compare_exchange_strong(
+                expected,
+                true
+            ))
+        {
+            set_ble_status("ERROR:BOTTLE_LEARN_ALREADY_QUEUED");
+            return true;
+        }
 
-        return started;
+        set_ble_status("OK:BOTTLE_LEARN_QUEUED");
+        ESP_LOGI(TAG, "Bottle calibration start request queued");
+        return true;
     }
 
     if (strcmp(command, "BOTTLE:LEARN_CANCEL") == 0)
     {
-        bottle_calibration_cancel();
-        set_ble_status("OK:BOTTLE_LEARN_CANCELLED");
+        bottle_calibration_cancel_requested.store(true);
+        set_ble_status("OK:BOTTLE_LEARN_CANCEL_QUEUED");
+        ESP_LOGI(TAG, "Bottle calibration cancel request queued");
         return true;
     }
 
@@ -669,15 +683,11 @@ static int command_characteristic_access(
             command
         );
 
-        if (!process_ble_command(command))
-        {
-            /*
-             * The status text contains the detailed reason.
-             */
-            return
-                BLE_ATT_ERR_VALUE_NOT_ALLOWED;
-        }
-
+        /*
+         * The BLE write itself succeeded. Application-level failures are
+         * reported through last_ble_status as ERROR:...
+         */
+        process_ble_command(command);
         return 0;
     }
 
@@ -1193,4 +1203,14 @@ esp_err_t bluetooth_init(
 bool bluetooth_is_initialized(void)
 {
     return ble_initialized;
+}
+
+bool bluetooth_take_bottle_calibration_start_request(void)
+{
+    return bottle_calibration_start_requested.exchange(false);
+}
+
+bool bluetooth_take_bottle_calibration_cancel_request(void)
+{
+    return bottle_calibration_cancel_requested.exchange(false);
 }

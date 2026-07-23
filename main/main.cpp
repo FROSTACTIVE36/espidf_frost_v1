@@ -1463,6 +1463,26 @@ extern "C" void app_main()
         update_shared_ir_dock_state();
 
         /*
+         * BLE callbacks only queue calibration commands. Execute them here
+         * so all LovyanGFX work remains on the main application task.
+         */
+        if (bluetooth_take_bottle_calibration_cancel_request())
+        {
+            ESP_LOGI(TAG, "Processing BLE bottle calibration cancel request");
+            bottle_calibration_cancel();
+        }
+
+        if (bluetooth_take_bottle_calibration_start_request())
+        {
+            ESP_LOGI(TAG, "Processing BLE bottle calibration start request");
+
+            if (!bottle_calibration_start())
+            {
+                ESP_LOGE(TAG, "Bottle calibration could not start");
+            }
+        }
+
+        /*
          * Calibration consumes HX711 readings and owns the complete
          * display while active.
          */

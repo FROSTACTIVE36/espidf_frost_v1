@@ -34,3 +34,15 @@ esp_err_t bluetooth_init(
  * Returns true after BLE initialization succeeds.
  */
 bool bluetooth_is_initialized(void);
+
+/**
+ * Returns true once when BLE has queued a bottle-calibration start request.
+ * Call from the main application task; do not draw from the NimBLE host task.
+ */
+bool bluetooth_take_bottle_calibration_start_request(void);
+
+/**
+ * Returns true once when BLE has queued a bottle-calibration cancel request.
+ * Call from the main application task.
+ */
+bool bluetooth_take_bottle_calibration_cancel_request(void);
