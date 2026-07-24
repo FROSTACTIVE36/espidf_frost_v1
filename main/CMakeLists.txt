@@ -17,6 +17,9 @@ idf_component_register(
         "consumption_tracker.cpp"
        "user_statistics.cpp"
        "statistics_history.cpp"
+       "action_log.cpp"
+        "wifi_manager.cpp"
+        "ota_manager.cpp"
 
     INCLUDE_DIRS
         "."
@@ -30,6 +33,14 @@ idf_component_register(
          bt
         nvs_flash
         spiffs
+         esp_wifi
+        esp_event
+        esp_netif
+        esp_http_client
+        esp_https_ota
+        app_update
+        mbedtls
+        espressif__cjson
         
 )
 

@@ -6,12 +6,15 @@
 #include <ctime>
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "LovyanGFX.hpp"
 
 #include "images/frost_logo.h"
 #include "images/clock_bg.h"
 #include "images/font.h"
 #include "images/font_regular.h"
+#include "images/font_small.h"
+#include "action_log.hpp"
 #include "images/drinkwater1.h"
 #include "images/image_time_to_stretch_inverted.h"
 #include "images/rule.h"
@@ -165,19 +168,79 @@ bool display_init()
     display_ready = true;
 
     /*
-     * Create a full-screen RGB565 sprite.
-     * It lets us draw the wallpaper and clock first,
-     * then send everything to the display in one push.
+     * Create a full-screen RGB565 sprite in external PSRAM.
+     * Required bytes: 240 x 240 x 2 = 115200 bytes.
      */
+    constexpr size_t SPRITE_BYTES =
+        static_cast<size_t>(DISPLAY_WIDTH) *
+        static_cast<size_t>(DISPLAY_HEIGHT) *
+        sizeof(uint16_t);
+
+    const size_t psram_total =
+        heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+
+    const size_t psram_free_before =
+        heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+
+    const size_t psram_largest_before =
+        heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+
+    const size_t internal_free_before =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+
+    ESP_LOGI(
+        TAG,
+        "Memory before sprite: PSRAM total=%u free=%u largest=%u, internal free=%u",
+        static_cast<unsigned>(psram_total),
+        static_cast<unsigned>(psram_free_before),
+        static_cast<unsigned>(psram_largest_before),
+        static_cast<unsigned>(internal_free_before)
+    );
+
+    if (
+        psram_total == 0 ||
+        psram_largest_before < SPRITE_BYTES
+    )
+    {
+        ESP_LOGE(
+            TAG,
+            "PSRAM unavailable or too small for sprite: need=%u bytes",
+            static_cast<unsigned>(SPRITE_BYTES)
+        );
+
+        ESP_LOGE(
+            TAG,
+            "Enable ESP PSRAM and make it available to heap_caps/malloc in menuconfig"
+        );
+
+        sprite_ready = false;
+        return true;
+    }
+
     screen.setColorDepth(16);
+
+    /* Must be called before createSprite(). */
     screen.setPsram(true);
     screen.setSwapBytes(true);
 
-    if (screen.createSprite(DISPLAY_WIDTH, DISPLAY_HEIGHT) == nullptr)
+    void* sprite_buffer =
+        screen.createSprite(
+            DISPLAY_WIDTH,
+            DISPLAY_HEIGHT
+        );
+
+    if (sprite_buffer == nullptr)
     {
-        ESP_LOGW(
+        ESP_LOGE(
             TAG,
-            "Sprite creation failed; logo can display, but clock cannot"
+            "PSRAM sprite creation failed: need=%u, free=%u, largest=%u",
+            static_cast<unsigned>(SPRITE_BYTES),
+            static_cast<unsigned>(
+                heap_caps_get_free_size(MALLOC_CAP_SPIRAM)
+            ),
+            static_cast<unsigned>(
+                heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)
+            )
         );
 
         sprite_ready = false;
@@ -185,6 +248,15 @@ bool display_init()
     }
 
     sprite_ready = true;
+
+    ESP_LOGI(
+        TAG,
+        "Display sprite created with PSRAM enabled: buffer=%p, PSRAM free after=%u",
+        sprite_buffer,
+        static_cast<unsigned>(
+            heap_caps_get_free_size(MALLOC_CAP_SPIRAM)
+        )
+    );
 
     ESP_LOGI(TAG, "Display and sprite initialized");
 
@@ -960,6 +1032,77 @@ void display_show_pomodoro_break(
     );
 }
 
+static void draw_action_log_overlay()
+{
+    ActionLogSnapshot snapshot;
+
+    if (!action_log_get_snapshot(snapshot))
+    {
+        return;
+    }
+
+    // OTA uses the outer circular ring. Bottle events only show the panel.
+    if (snapshot.source == ActionLogSource::OTA)
+    {
+        float start_angle = 270.0f;
+        float end_angle = start_angle;
+
+        if (snapshot.indeterminate)
+        {
+            start_angle = static_cast<float>(snapshot.animation_phase);
+            end_angle = start_angle + 72.0f;
+        }
+        else if (snapshot.progress_percentage >= 0)
+        {
+            end_angle = start_angle +
+                (static_cast<float>(snapshot.progress_percentage) / 100.0f) * 360.0f;
+        }
+
+        if (end_angle > start_angle)
+        {
+            screen.fillArc(
+                CLOCK_CENTER_X,
+                CLOCK_CENTER_Y,
+                CLOCK_PROGRESS_RADIUS,
+                CLOCK_PROGRESS_RADIUS + CLOCK_PROGRESS_WIDTH - 1,
+                start_angle,
+                end_angle,
+                TFT_CYAN
+            );
+        }
+    }
+
+    static constexpr int PANEL_X = 32;
+    static constexpr int PANEL_Y = 170;
+    static constexpr int PANEL_WIDTH = 176;
+    static constexpr int PANEL_HEIGHT = 34;
+
+    screen.fillRoundRect(
+        PANEL_X,
+        PANEL_Y,
+        PANEL_WIDTH,
+        PANEL_HEIGHT,
+        10,
+        TFT_BLACK
+    );
+
+    screen.drawRoundRect(
+        PANEL_X,
+        PANEL_Y,
+        PANEL_WIDTH,
+        PANEL_HEIGHT,
+        10,
+        snapshot.source == ActionLogSource::OTA ? TFT_CYAN : TFT_DARKGREY
+    );
+
+    screen.loadFont(font_small);
+    screen.setTextDatum(lgfx::textdatum_t::middle_center);
+    screen.setTextColor(TFT_WHITE);
+    screen.setTextSize(1);
+    screen.drawString(snapshot.message, 120, PANEL_Y + PANEL_HEIGHT / 2);
+    screen.unloadFont();
+}
+
 /* =========================================================
  * Home clock screen
  * ========================================================= */
@@ -1028,6 +1171,8 @@ void display_show_home_clock(time_t current_time)
     );
 
     screen.unloadFont();
+
+    draw_action_log_overlay();
 
     // Push completed frame
     display.startWrite();

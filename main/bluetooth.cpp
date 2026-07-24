@@ -32,6 +32,9 @@
 #include "bottle_calibration.hpp"
 #include "user_statistics.hpp"
 #include "statistics_history.hpp"
+#include "wifi_manager.hpp"
+#include "ota_manager.hpp"
+#include <cstring>
 
 
 static const char *TAG = "FROST_BLE";
@@ -41,7 +44,7 @@ static const char *TAG = "FROST_BLE";
  * BLE configuration
  * ========================================================= */
 
-#define BLE_DEFAULT_DEVICE_NAME "ESP32_RTC"
+#define BLE_DEFAULT_DEVICE_NAME "FROST"
 #define BLE_DEVICE_NAME_MAX_LEN 24
 #define BLE_DEVICE_NVS_NAMESPACE "frost_device"
 #define BLE_DEVICE_NAME_NVS_KEY "ble_name"
@@ -722,7 +725,7 @@ static bool process_ble_command(
         return true;
     }
 
-    if (strcmp(command, "DEVICE:MAC:GET") == 0)
+    if (strcmp(command, "MAC:GET") == 0)
     {
         char mac_text[18] = {};
 
@@ -826,6 +829,84 @@ static bool process_ble_command(
 
         set_ble_status(response);
         return true;
+    }
+
+
+    if (strncmp(command, "WIFI:SET:", 9) == 0)
+    {
+        char credentials[100] = {};
+        std::strncpy(credentials, command + 9, sizeof(credentials) - 1);
+
+        char* separator = std::strchr(credentials, '|');
+        if (separator == nullptr)
+        {
+            set_ble_status("ERROR:WIFI_FORMAT");
+            return false;
+        }
+
+        *separator = '\0';
+        const char* ssid = credentials;
+        const char* password = separator + 1;
+
+        if (!wifi_manager_set_credentials(ssid, password))
+        {
+            set_ble_status("ERROR:WIFI_SAVE");
+            return false;
+        }
+
+        set_ble_status("OK:WIFI_SAVED");
+        return true;
+    }
+
+    if (strcmp(command, "WIFI:STATUS") == 0)
+    {
+        char response[128] = {};
+        wifi_manager_get_status(response, sizeof(response));
+        set_ble_status(response);
+        return true;
+    }
+
+    if (strcmp(command, "OTA:INFO") == 0)
+    {
+        char response[128] = {};
+        std::snprintf(
+            response,
+            sizeof(response),
+            "OTA_INFO:version=%s,busy=%s",
+            FROST_FIRMWARE_VERSION,
+            ota_manager_is_busy() ? "yes" : "no"
+        );
+        set_ble_status(response);
+        return true;
+    }
+
+    if (strcmp(command, "OTA:CHECK") == 0)
+    {
+        const bool queued = ota_manager_request_check();
+        set_ble_status(queued ? "OK:OTA_CHECK_QUEUED" : "ERROR:OTA_BUSY");
+        return queued;
+    }
+
+    if (strcmp(command, "OTA:START") == 0)
+    {
+        const bool queued = ota_manager_request_start();
+        set_ble_status(queued ? "OK:OTA_START_QUEUED" : "ERROR:OTA_BUSY");
+        return queued;
+    }
+
+    if (strcmp(command, "OTA:STATUS") == 0)
+    {
+        char response[128] = {};
+        ota_manager_get_status(response, sizeof(response));
+        set_ble_status(response);
+        return true;
+    }
+
+    if (strcmp(command, "OTA:CANCEL") == 0)
+    {
+        const bool accepted = ota_manager_request_cancel();
+        set_ble_status(accepted ? "OK:OTA_CANCEL_REQUESTED" : "ERROR:OTA_NOT_ACTIVE");
+        return accepted;
     }
 
     /*

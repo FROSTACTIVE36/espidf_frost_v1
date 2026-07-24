@@ -29,6 +29,9 @@
 #include "consumption_tracker.hpp"
 #include "statistics_history.hpp"
 #include "user_statistics.hpp"
+#include "action_log.hpp"
+#include "wifi_manager.hpp"
+#include "ota_manager.hpp"
 
 /* =========================================================
  * Logging
@@ -137,6 +140,12 @@ static void update_shared_ir_dock_state()
     }
 
     dock_reported_state = dock_candidate_state;
+
+    action_log_show_bottle(
+        dock_reported_state
+            ? "Bottle detected"
+            : "Bottle removed"
+    );
 
     audio_manager_set_dock_state(dock_reported_state);
     bottle_calibration_set_docked(dock_reported_state);
@@ -1312,6 +1321,14 @@ extern "C" void app_main()
         );
     }
 
+
+
+  /* -----------------------------------------------------
+     * Initialize Bluetooth
+     * ----------------------------------------------------- */
+
+    initialize_bluetooth();
+
     /* -----------------------------------------------------
      * Initialize display
      * ----------------------------------------------------- */
@@ -1436,10 +1453,24 @@ extern "C" void app_main()
     }
 
     /* -----------------------------------------------------
-     * Initialize Bluetooth
+     * Initialize action log, Wi-Fi and OTA
      * ----------------------------------------------------- */
 
-    initialize_bluetooth();
+    action_log_init();
+
+    const esp_err_t wifi_result = wifi_manager_init();
+    if (wifi_result != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Wi-Fi manager initialization failed: %s", esp_err_to_name(wifi_result));
+    }
+
+    const esp_err_t ota_result = ota_manager_init();
+    if (ota_result != ESP_OK)
+    {
+        ESP_LOGE(TAG, "OTA manager initialization failed: %s", esp_err_to_name(ota_result));
+    }
+
+  
 
     /* -----------------------------------------------------
      * Show current time in logs
@@ -1460,6 +1491,8 @@ extern "C" void app_main()
     {
         const time_t now =
             time(nullptr);
+
+        action_log_update();
 
         /* Archives the completed day to SPIFFS immediately after date rollover. */
         user_statistics_update_day();
