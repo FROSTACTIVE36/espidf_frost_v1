@@ -5,9 +5,12 @@
 #include <string.h>
 #include <atomic>
 #include <cstddef>
+#include <cstdlib>
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_mac.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 #include <cstdio>
 #include "freertos/FreeRTOS.h"
@@ -28,6 +31,7 @@
 #include "pomodoro.hpp"
 #include "bottle_calibration.hpp"
 #include "user_statistics.hpp"
+#include "statistics_history.hpp"
 
 
 static const char *TAG = "FROST_BLE";
@@ -37,7 +41,11 @@ static const char *TAG = "FROST_BLE";
  * BLE configuration
  * ========================================================= */
 
-#define BLE_DEVICE_NAME       "ESP32_RTC"
+#define BLE_DEFAULT_DEVICE_NAME "ESP32_RTC"
+#define BLE_DEVICE_NAME_MAX_LEN 24
+#define BLE_DEVICE_NVS_NAMESPACE "frost_device"
+#define BLE_DEVICE_NAME_NVS_KEY "ble_name"
+
 #define BLE_COMMAND_MAX_LEN   128
 #define JSON_CONFIG_MAX_LEN   8192
 #define JSON_WORKER_STACK_SIZE 8192
@@ -76,7 +84,16 @@ static uint8_t own_address_type = 0;
 static uint16_t command_value_handle = 0;
 
 static bool ble_initialized = false;
+
+/*
+ * The user-defined BLE name is stored separately from reminder JSON.
+ * It is loaded from NVS before NimBLE advertising starts.
+ */
+static char current_ble_device_name[BLE_DEVICE_NAME_MAX_LEN + 1] =
+    BLE_DEFAULT_DEVICE_NAME;
 static std::size_t statistics_line_cursor = 0;
+enum class StatisticsExportMode : uint8_t { TODAY, HISTORY, SELECTED_DAY };
+static StatisticsExportMode statistics_export_mode = StatisticsExportMode::TODAY;
 
 /*
  * BLE callbacks run in the NimBLE host task. Calibration changes the display,
@@ -117,6 +134,273 @@ static portMUX_TYPE json_worker_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static char last_ble_status[128] =
     "FROST_BLE_READY";
+
+
+
+/* =========================================================
+ * Device identity: BLE name and Bluetooth MAC
+ * ========================================================= */
+
+static bool is_valid_device_name(
+    const char *name
+)
+{
+    if (name == nullptr)
+    {
+        return false;
+    }
+
+    const size_t length = strlen(name);
+
+    if (
+        length == 0 ||
+        length > BLE_DEVICE_NAME_MAX_LEN
+    )
+    {
+        return false;
+    }
+
+    for (size_t index = 0; index < length; ++index)
+    {
+        const unsigned char value =
+            static_cast<unsigned char>(name[index]);
+
+        /*
+         * Keep the advertised name printable and single-line.
+         */
+        if (value < 0x20 || value > 0x7E)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
+static void load_ble_device_name(void)
+{
+    snprintf(
+        current_ble_device_name,
+        sizeof(current_ble_device_name),
+        "%s",
+        BLE_DEFAULT_DEVICE_NAME
+    );
+
+    nvs_handle_t handle = 0;
+
+    const esp_err_t open_error =
+        nvs_open(
+            BLE_DEVICE_NVS_NAMESPACE,
+            NVS_READONLY,
+            &handle
+        );
+
+    if (open_error == ESP_ERR_NVS_NOT_FOUND)
+    {
+        ESP_LOGI(
+            TAG,
+            "No saved BLE device name; using default: %s",
+            current_ble_device_name
+        );
+
+        return;
+    }
+
+    if (open_error != ESP_OK)
+    {
+        ESP_LOGW(
+            TAG,
+            "Could not open BLE device-name NVS: %s",
+            esp_err_to_name(open_error)
+        );
+
+        return;
+    }
+
+    size_t required_length =
+        sizeof(current_ble_device_name);
+
+    const esp_err_t read_error =
+        nvs_get_str(
+            handle,
+            BLE_DEVICE_NAME_NVS_KEY,
+            current_ble_device_name,
+            &required_length
+        );
+
+    nvs_close(handle);
+
+    if (
+        read_error != ESP_OK ||
+        !is_valid_device_name(current_ble_device_name)
+    )
+    {
+        snprintf(
+            current_ble_device_name,
+            sizeof(current_ble_device_name),
+            "%s",
+            BLE_DEFAULT_DEVICE_NAME
+        );
+
+        ESP_LOGW(
+            TAG,
+            "Saved BLE name invalid or unavailable; using default: %s",
+            current_ble_device_name
+        );
+
+        return;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "Loaded BLE device name: %s",
+        current_ble_device_name
+    );
+}
+
+
+static bool save_ble_device_name(
+    const char *name
+)
+{
+    if (!is_valid_device_name(name))
+    {
+        return false;
+    }
+
+    nvs_handle_t handle = 0;
+
+    esp_err_t error =
+        nvs_open(
+            BLE_DEVICE_NVS_NAMESPACE,
+            NVS_READWRITE,
+            &handle
+        );
+
+    if (error != ESP_OK)
+    {
+        ESP_LOGE(
+            TAG,
+            "Could not open BLE device-name NVS: %s",
+            esp_err_to_name(error)
+        );
+
+        return false;
+    }
+
+    error =
+        nvs_set_str(
+            handle,
+            BLE_DEVICE_NAME_NVS_KEY,
+            name
+        );
+
+    if (error == ESP_OK)
+    {
+        error = nvs_commit(handle);
+    }
+
+    nvs_close(handle);
+
+    if (error != ESP_OK)
+    {
+        ESP_LOGE(
+            TAG,
+            "Could not save BLE device name: %s",
+            esp_err_to_name(error)
+        );
+
+        return false;
+    }
+
+    snprintf(
+        current_ble_device_name,
+        sizeof(current_ble_device_name),
+        "%s",
+        name
+    );
+
+    /*
+     * The current connection keeps working. The new name is used the
+     * next time advertising starts, normally after disconnect/reconnect.
+     */
+    const int gap_result =
+        ble_svc_gap_device_name_set(
+            current_ble_device_name
+        );
+
+    if (gap_result != 0)
+    {
+        ESP_LOGE(
+            TAG,
+            "Saved name but could not update GAP name, rc=%d",
+            gap_result
+        );
+
+        return false;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "BLE device renamed to: %s",
+        current_ble_device_name
+    );
+
+    return true;
+}
+
+
+static bool get_bluetooth_mac_string(
+    char *output,
+    size_t output_size
+)
+{
+    if (
+        output == nullptr ||
+        output_size < 18
+    )
+    {
+        return false;
+    }
+
+    uint8_t mac[6] = {};
+
+    const esp_err_t error =
+        esp_read_mac(
+            mac,
+            ESP_MAC_BT
+        );
+
+    if (error != ESP_OK)
+    {
+        output[0] = '\0';
+
+        ESP_LOGE(
+            TAG,
+            "Could not read Bluetooth MAC: %s",
+            esp_err_to_name(error)
+        );
+
+        return false;
+    }
+
+    const int written =
+        snprintf(
+            output,
+            output_size,
+            "%02X:%02X:%02X:%02X:%02X:%02X",
+            mac[0],
+            mac[1],
+            mac[2],
+            mac[3],
+            mac[4],
+            mac[5]
+        );
+
+    return
+        written == 17;
+}
 
 
 static void set_ble_status(
@@ -416,6 +700,135 @@ static bool process_ble_command(
     }
 
     /*
+     * Device identity commands:
+     *
+     * DEVICE:GET
+     * DEVICE:NAME:GET
+     * DEVICE:NAME:SET:<new name>
+     * DEVICE:MAC:GET
+     */
+    if (strcmp(command, "DEVICE:NAME:GET") == 0)
+    {
+        char response[64] = {};
+
+        snprintf(
+            response,
+            sizeof(response),
+            "DEVICE_NAME:%s",
+            current_ble_device_name
+        );
+
+        set_ble_status(response);
+        return true;
+    }
+
+    if (strcmp(command, "DEVICE:MAC:GET") == 0)
+    {
+        char mac_text[18] = {};
+
+        if (
+            !get_bluetooth_mac_string(
+                mac_text,
+                sizeof(mac_text)
+            )
+        )
+        {
+            set_ble_status("ERROR:DEVICE_MAC");
+            return false;
+        }
+
+        char response[40] = {};
+
+        snprintf(
+            response,
+            sizeof(response),
+            "DEVICE_MAC:%s",
+            mac_text
+        );
+
+        set_ble_status(response);
+        return true;
+    }
+
+    if (strcmp(command, "DEVICE:GET") == 0)
+    {
+        char mac_text[18] = {};
+
+        if (
+            !get_bluetooth_mac_string(
+                mac_text,
+                sizeof(mac_text)
+            )
+        )
+        {
+            set_ble_status("ERROR:DEVICE_MAC");
+            return false;
+        }
+
+        char response[96] = {};
+
+        snprintf(
+            response,
+            sizeof(response),
+            "DEVICE:name=%s,mac=%s",
+            current_ble_device_name,
+            mac_text
+        );
+
+        set_ble_status(response);
+        return true;
+    }
+
+    static constexpr char device_name_set_prefix[] =
+        "DEVICE:NAME:SET:";
+
+    static constexpr size_t device_name_set_prefix_length =
+        sizeof(device_name_set_prefix) - 1;
+
+    if (
+        strncmp(
+            command,
+            device_name_set_prefix,
+            device_name_set_prefix_length
+        ) == 0
+    )
+    {
+        const char *new_name =
+            command +
+            device_name_set_prefix_length;
+
+        if (!is_valid_device_name(new_name))
+        {
+            set_ble_status(
+                "ERROR:DEVICE_NAME_INVALID"
+            );
+
+            return false;
+        }
+
+        if (!save_ble_device_name(new_name))
+        {
+            set_ble_status(
+                "ERROR:DEVICE_NAME_SAVE"
+            );
+
+            return false;
+        }
+
+        char response[64] = {};
+
+        snprintf(
+            response,
+            sizeof(response),
+            "OK:DEVICE_NAME_SET:%s",
+            current_ble_device_name
+        );
+
+        set_ble_status(response);
+        return true;
+    }
+
+    /*
      * RTC command:
      *
      * SET 2026-07-20 22:30:00
@@ -486,6 +899,7 @@ static bool process_ble_command(
     )
     {
         statistics_line_cursor = 0;
+        statistics_export_mode = StatisticsExportMode::TODAY;
 
         char response[128] = {};
         if (!user_statistics_get_line(
@@ -502,10 +916,69 @@ static bool process_ble_command(
         return true;
     }
 
-    if (strcmp(command, "STATS:NEXT") == 0)
+    if (strcmp(command, "STATS:HISTORY") == 0)
     {
-        const std::size_t line_count =
-            user_statistics_line_count();
+        statistics_line_cursor = 0;
+        statistics_export_mode = StatisticsExportMode::HISTORY;
+
+        char response[128] = {};
+        if (!statistics_history_get_line(0, response, sizeof(response)))
+        {
+            set_ble_status("ERROR:HISTORY_NOT_READY");
+            return false;
+        }
+        set_ble_status(response);
+        return true;
+    }
+
+    static constexpr char stats_day_prefix[] = "STATS:DAY:";
+    if (strncmp(command, stats_day_prefix, sizeof(stats_day_prefix) - 1) == 0)
+    {
+        const char* date_text = command + sizeof(stats_day_prefix) - 1;
+        char* end = nullptr;
+        const unsigned long day = std::strtoul(date_text, &end, 10);
+        if (end == date_text || *end != '\0' || day > 99999999UL ||
+            !statistics_history_select_day(static_cast<uint32_t>(day)))
+        {
+            set_ble_status("ERROR:HISTORY_DAY_NOT_FOUND");
+            return false;
+        }
+
+        statistics_line_cursor = 0;
+        statistics_export_mode = StatisticsExportMode::SELECTED_DAY;
+        char response[128] = {};
+        if (!statistics_history_get_selected_day_line(0, response, sizeof(response)))
+        {
+            set_ble_status("ERROR:HISTORY_DAY");
+            return false;
+        }
+        set_ble_status(response);
+        return true;
+    }
+
+    if (strcmp(command, "STATS:HISTORY_CLEAR") == 0)
+    {
+        if (!statistics_history_clear())
+        {
+            set_ble_status("ERROR:HISTORY_CLEAR");
+            return false;
+        }
+        statistics_line_cursor = 0;
+        statistics_export_mode = StatisticsExportMode::TODAY;
+        set_ble_status("HISTORY_CLEAR_OK");
+        return true;
+    }
+
+    if (strcmp(command, "STATS:NEXT") == 0 ||
+        strcmp(command, "STATS:HISTORY_NEXT") == 0)
+    {
+        std::size_t line_count = 0;
+        if (statistics_export_mode == StatisticsExportMode::TODAY)
+            line_count = user_statistics_line_count();
+        else if (statistics_export_mode == StatisticsExportMode::HISTORY)
+            line_count = statistics_history_line_count();
+        else
+            line_count = statistics_history_selected_day_line_count();
 
         if (line_count == 0)
         {
@@ -519,11 +992,15 @@ static bool process_ble_command(
         }
 
         char response[128] = {};
-        if (!user_statistics_get_line(
-                statistics_line_cursor,
-                response,
-                sizeof(response)
-            ))
+        bool ok = false;
+        if (statistics_export_mode == StatisticsExportMode::TODAY)
+            ok = user_statistics_get_line(statistics_line_cursor, response, sizeof(response));
+        else if (statistics_export_mode == StatisticsExportMode::HISTORY)
+            ok = statistics_history_get_line(statistics_line_cursor, response, sizeof(response));
+        else
+            ok = statistics_history_get_selected_day_line(statistics_line_cursor, response, sizeof(response));
+
+        if (!ok)
         {
             set_ble_status("ERROR:STATS_LINE");
             return false;
@@ -537,6 +1014,7 @@ static bool process_ble_command(
     {
         user_statistics_reset_today();
         statistics_line_cursor = 0;
+        statistics_export_mode = StatisticsExportMode::TODAY;
         set_ble_status("STATS_RESET_OK");
         return true;
     }
@@ -1063,7 +1541,7 @@ static void start_advertising(void)
     ESP_LOGI(
         TAG,
         "Advertising as %s",
-        BLE_DEVICE_NAME
+        device_name
     );
 }
 
@@ -1163,6 +1641,11 @@ esp_err_t bluetooth_init(
 
     reset_json_reception();
 
+    /*
+     * NVS is initialized by app_main() before bluetooth_init().
+     */
+    load_ble_device_name();
+
     esp_err_t error =
         nimble_port_init();
 
@@ -1190,7 +1673,7 @@ esp_err_t bluetooth_init(
 
     int result =
         ble_svc_gap_device_name_set(
-            BLE_DEVICE_NAME
+            current_ble_device_name
         );
 
     if (result != 0)
@@ -1278,4 +1761,9 @@ bool bluetooth_take_bottle_calibration_start_request(void)
 bool bluetooth_take_bottle_calibration_cancel_request(void)
 {
     return bottle_calibration_cancel_requested.exchange(false);
+}
+
+const char *bluetooth_get_device_name(void)
+{
+    return current_ble_device_name;
 }

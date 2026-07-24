@@ -27,6 +27,8 @@
 #include "scale.hpp"
 #include "bottle_calibration.hpp"
 #include "consumption_tracker.hpp"
+#include "statistics_history.hpp"
+#include "user_statistics.hpp"
 
 /* =========================================================
  * Logging
@@ -1239,7 +1241,8 @@ static void initialize_bluetooth()
 
     ESP_LOGI(
         TAG,
-        "Bluetooth ready; advertising as ESP32_RTC"
+        "Bluetooth ready; advertising as %s",
+        bluetooth_get_device_name()
     );
 }
 
@@ -1271,6 +1274,15 @@ extern "C" void app_main()
     if (!initialize_nvs())
     {
         return;
+    }
+
+    /* Mount SPIFFS and load the rolling 30-day statistics history. */
+    const esp_err_t history_result = statistics_history_init();
+    if (history_result != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Statistics history initialization failed: %s",
+                 esp_err_to_name(history_result));
+        /* Continue: today's NVS statistics still work. */
     }
 
     /* -----------------------------------------------------
@@ -1448,6 +1460,9 @@ extern "C" void app_main()
     {
         const time_t now =
             time(nullptr);
+
+        /* Archives the completed day to SPIFFS immediately after date rollover. */
+        user_statistics_update_day();
 
         /*
          * Read the acknowledgement/Pomodoro input.

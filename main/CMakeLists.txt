@@ -16,6 +16,7 @@ idf_component_register(
         "bottle_calibration.cpp"
         "consumption_tracker.cpp"
        "user_statistics.cpp"
+       "statistics_history.cpp"
 
     INCLUDE_DIRS
         "."
@@ -28,6 +29,7 @@ idf_component_register(
         driver
          bt
         nvs_flash
+        spiffs
         
 )
 

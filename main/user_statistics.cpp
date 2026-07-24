@@ -7,6 +7,8 @@
 
 #include "esp_log.h"
 #include "nvs.h"
+#include "consumption_tracker.hpp"
+#include "statistics_history.hpp"
 
 namespace
 {
@@ -105,6 +107,81 @@ void save()
     }
 }
 
+DailyStatisticsRecord make_history_record(const StoredStatistics& source)
+{
+    DailyStatisticsRecord record = {};
+    record.version = 1;
+    record.yyyymmdd = source.yyyymmdd;
+    record.hydration_goal_ml = consumption_tracker_daily_goal_ml();
+    record.hydration_ml = source.hydration_ml;
+
+    record.hydration.acknowledged = source.hydration.acknowledged;
+    record.hydration.missed = source.hydration.missed;
+    record.stretch.acknowledged = source.stretch.acknowledged;
+    record.stretch.missed = source.stretch.missed;
+    record.eye.acknowledged = source.eye.acknowledged;
+    record.eye.missed = source.eye.missed;
+    record.walk.acknowledged = source.walk.acknowledged;
+    record.walk.missed = source.walk.missed;
+    record.meditation.acknowledged = source.meditation.acknowledged;
+    record.meditation.missed = source.meditation.missed;
+
+    for (std::size_t i = 0; i < MAX_MEDICINES; ++i)
+    {
+        const TokenCounter& input = source.medicines[i];
+        HistoryTokenCounter& output = record.medicines[i];
+        output.used = input.used;
+        std::strncpy(output.token_id, input.token_id, REMINDER_ID_LENGTH - 1);
+        output.acknowledged = input.acknowledged;
+        output.missed = input.missed;
+        output.snoozed = input.snoozed;
+        output.last_ack_timestamp = input.last_ack_timestamp;
+        output.last_miss_timestamp = input.last_miss_timestamp;
+    }
+
+    for (std::size_t i = 0; i < MAX_CUSTOM_EVENTS; ++i)
+    {
+        const TokenCounter& input = source.custom_events[i];
+        HistoryTokenCounter& output = record.custom_events[i];
+        output.used = input.used;
+        std::strncpy(output.token_id, input.token_id, REMINDER_ID_LENGTH - 1);
+        output.acknowledged = input.acknowledged;
+        output.missed = input.missed;
+        output.snoozed = input.snoozed;
+        output.last_ack_timestamp = input.last_ack_timestamp;
+        output.last_miss_timestamp = input.last_miss_timestamp;
+    }
+
+    return record;
+}
+
+void archive_completed_day_if_valid(const StoredStatistics& completed)
+{
+    if (completed.yyyymmdd < 20250101)
+    {
+        return;
+    }
+
+    if (!statistics_history_is_initialized())
+    {
+        ESP_LOGW(TAG, "History unavailable; completed day %lu not archived",
+                 static_cast<unsigned long>(completed.yyyymmdd));
+        return;
+    }
+
+    const DailyStatisticsRecord record = make_history_record(completed);
+    if (statistics_history_append(record))
+    {
+        ESP_LOGI(TAG, "Archived statistics day %lu",
+                 static_cast<unsigned long>(completed.yyyymmdd));
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Failed to archive statistics day %lu",
+                 static_cast<unsigned long>(completed.yyyymmdd));
+    }
+}
+
 void ensure_current_day()
 {
     const uint32_t today = current_yyyymmdd();
@@ -115,6 +192,8 @@ void ensure_current_day()
 
     if (statistics_data.yyyymmdd != today)
     {
+        const StoredStatistics completed = statistics_data;
+        archive_completed_day_if_valid(completed);
         clear_for_day(today);
         save();
         ESP_LOGI(TAG, "Started statistics day %lu", static_cast<unsigned long>(today));
@@ -225,10 +304,10 @@ esp_err_t user_statistics_init()
         if (
             read_error == ESP_OK &&
             size == sizeof(stored) &&
-            stored.version == STORED_VERSION &&
-            stored.yyyymmdd == current_yyyymmdd()
+            stored.version == STORED_VERSION
         )
         {
+            /* Load even an older day. ensure_current_day() archives it first. */
             statistics_data = stored;
         }
     }

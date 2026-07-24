@@ -46,3 +46,10 @@ bool bluetooth_take_bottle_calibration_start_request(void);
  * Call from the main application task.
  */
 bool bluetooth_take_bottle_calibration_cancel_request(void);
+
+/**
+ * Returns the active BLE advertising name.
+ *
+ * The returned pointer remains owned by the Bluetooth module.
+ */
+const char *bluetooth_get_device_name(void);
