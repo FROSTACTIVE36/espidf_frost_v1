@@ -15,7 +15,7 @@ idf_component_register(
         "scale.cpp"
         "bottle_calibration.cpp"
         "consumption_tracker.cpp"
-       
+       "user_statistics.cpp"
 
     INCLUDE_DIRS
         "."

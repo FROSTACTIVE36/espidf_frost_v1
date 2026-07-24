@@ -1039,6 +1039,216 @@ void display_show_home_clock(time_t current_time)
  * Bottle calibration full-screen wizard
  * ========================================================= */
 
+/*
+ * Draw one calibration text block using font_regular while keeping it inside
+ * the usable area of the circular GC9A01 display.
+ *
+ * The text is wrapped on word boundaries and limited to two lines.  Each
+ * block has its own maximum width because the circle is narrower near the
+ * top and bottom.
+ */
+static void draw_calibration_text_block(
+    const char* text,
+    int16_t center_y,
+    uint16_t maximum_width,
+    uint16_t color
+)
+{
+    if (text == nullptr || text[0] == '\0')
+    {
+        return;
+    }
+
+    static constexpr size_t BUFFER_SIZE = 96;
+    static constexpr int MAX_LINES = 2;
+
+    char source[BUFFER_SIZE] = {};
+    char lines[MAX_LINES][BUFFER_SIZE] = {};
+
+    /* Copy with an explicit bound to avoid format-truncation warnings. */
+    const size_t source_length = std::strlen(text);
+    const size_t source_copy_length =
+        source_length < (BUFFER_SIZE - 1)
+            ? source_length
+            : (BUFFER_SIZE - 1);
+
+    std::memcpy(source, text, source_copy_length);
+    source[source_copy_length] = '\0';
+
+    int line_count = 0;
+    char* save_pointer = nullptr;
+    char* word = strtok_r(source, " ", &save_pointer);
+
+    while (word != nullptr && line_count < MAX_LINES)
+    {
+        char candidate[BUFFER_SIZE] = {};
+
+        const size_t current_length =
+            std::strlen(lines[line_count]);
+        const size_t word_length = std::strlen(word);
+
+        size_t candidate_length = 0;
+
+        if (current_length > 0)
+        {
+            const size_t first_copy =
+                current_length < (BUFFER_SIZE - 1)
+                    ? current_length
+                    : (BUFFER_SIZE - 1);
+
+            std::memcpy(
+                candidate,
+                lines[line_count],
+                first_copy
+            );
+
+            candidate_length = first_copy;
+
+            if (candidate_length < (BUFFER_SIZE - 1))
+            {
+                candidate[candidate_length++] = ' ';
+            }
+        }
+
+        if (candidate_length < (BUFFER_SIZE - 1))
+        {
+            const size_t available =
+                (BUFFER_SIZE - 1) - candidate_length;
+            const size_t word_copy =
+                word_length < available
+                    ? word_length
+                    : available;
+
+            std::memcpy(
+                candidate + candidate_length,
+                word,
+                word_copy
+            );
+
+            candidate_length += word_copy;
+        }
+
+        candidate[candidate_length] = '\0';
+
+        if (
+            screen.textWidth(candidate) <=
+            static_cast<int32_t>(maximum_width)
+        )
+        {
+            const size_t copy_length =
+                candidate_length < (BUFFER_SIZE - 1)
+                    ? candidate_length
+                    : (BUFFER_SIZE - 1);
+
+            std::memcpy(
+                lines[line_count],
+                candidate,
+                copy_length
+            );
+
+            lines[line_count][copy_length] = '\0';
+        }
+        else if (lines[line_count][0] == '\0')
+        {
+            /*
+             * A single word is wider than the safe area. Keep it visible by
+             * shortening it rather than allowing it to cross the circle.
+             */
+            const size_t copy_length =
+                word_length < (BUFFER_SIZE - 1)
+                    ? word_length
+                    : (BUFFER_SIZE - 1);
+
+            std::memcpy(
+                lines[line_count],
+                word,
+                copy_length
+            );
+
+            lines[line_count][copy_length] = '\0';
+
+            while (
+                std::strlen(lines[line_count]) > 1 &&
+                screen.textWidth(lines[line_count]) >
+                    static_cast<int32_t>(maximum_width)
+            )
+            {
+                lines[line_count][
+                    std::strlen(lines[line_count]) - 1
+                ] = '\0';
+            }
+
+            ++line_count;
+        }
+        else
+        {
+            ++line_count;
+
+            if (line_count < MAX_LINES)
+            {
+                const size_t copy_length =
+                    word_length < (BUFFER_SIZE - 1)
+                        ? word_length
+                        : (BUFFER_SIZE - 1);
+
+                std::memcpy(
+                    lines[line_count],
+                    word,
+                    copy_length
+                );
+
+                lines[line_count][copy_length] = '\0';
+            }
+        }
+
+        word = strtok_r(nullptr, " ", &save_pointer);
+    }
+
+    if (
+        line_count < MAX_LINES &&
+        lines[line_count][0] != '\0'
+    )
+    {
+        ++line_count;
+    }
+
+    if (line_count <= 0)
+    {
+        return;
+    }
+
+    int16_t line_height =
+        static_cast<int16_t>(screen.fontHeight());
+
+    if (line_height <= 0)
+    {
+        line_height = 18;
+    }
+
+    const int16_t line_spacing = line_height + 2;
+    const int16_t first_y =
+        center_y -
+        static_cast<int16_t>(
+            ((line_count - 1) * line_spacing) / 2
+        );
+
+    screen.setTextDatum(
+        lgfx::textdatum_t::middle_center
+    );
+
+    screen.setTextColor(color);
+    screen.setTextSize(1);
+
+    for (int index = 0; index < line_count; ++index)
+    {
+        screen.drawString(
+            lines[index],
+            DISPLAY_WIDTH / 2,
+            first_y + index * line_spacing
+        );
+    }
+}
+
 static void draw_calibration_screen(
     const char* heading,
     const char* line1,
@@ -1052,38 +1262,42 @@ static void draw_calibration_screen(
 
     screen.fillSprite(TFT_BLACK);
 
-    /* Use the same embedded font as medication and custom screens. */
+    /*
+     * Keep font_regular, but wrap each block within a width that is safe for
+     * its vertical position on the circular display.
+     */
     screen.loadFont(font_regular);
-    screen.setTextDatum(lgfx::textdatum_t::middle_center);
-    screen.setTextColor(TFT_WHITE);
     screen.setTextSize(1);
 
-    screen.drawString(
+    draw_calibration_text_block(
         heading != nullptr ? heading : "",
-        120,
-        65
+        45,
+        145,
+        TFT_WHITE
     );
 
-    screen.setTextSize(1);
-    screen.setTextColor(TFT_CYAN);
-
-    screen.drawString(
+    draw_calibration_text_block(
         line1 != nullptr ? line1 : "",
-        120,
-        120
+        108,
+        180,
+        TFT_WHITE
     );
 
-    screen.setTextColor(TFT_WHITE);
-
-    screen.drawString(
+    draw_calibration_text_block(
         line2 != nullptr ? line2 : "",
-        120,
-        150
+        168,
+        160,
+        TFT_WHITE
     );
 
     screen.unloadFont();
 
-    screen.drawCircle(120, 120, 112, TFT_DARKGREY);
+    screen.drawCircle(
+        DISPLAY_WIDTH / 2,
+        DISPLAY_HEIGHT / 2,
+        112,
+        TFT_DARKGREY
+    );
 
     display.startWrite();
     screen.pushSprite(0, 0);
@@ -1095,7 +1309,7 @@ void display_show_calibration_remove_bottle()
     draw_calibration_screen(
         "CALIBRATION",
         "REMOVE BOTTLE",
-        "Preparing tare"
+        "Preparing tare "
     );
 }
 
@@ -1103,7 +1317,7 @@ void display_show_calibration_place_empty()
 {
     draw_calibration_screen(
         "CALIBRATION",
-        "PLACE EMPTY BOTTLE",
+        "place empty bottle",
         "Keep it on the dock"
     );
 }
@@ -1112,8 +1326,8 @@ void display_show_calibration_fill_bottle()
 {
     draw_calibration_screen(
         "CALIBRATION",
-        "REMOVE AND FILL",
-        "Fill bottle completely"
+        "Remove bottle & fill",
+        "it completely"
     );
 }
 
@@ -1121,8 +1335,8 @@ void display_show_calibration_place_full()
 {
     draw_calibration_screen(
         "CALIBRATION",
-        "PLACE FULL BOTTLE",
-        "Keep it on the dock"
+        "Place full bottle",
+        "on the dock"
     );
 }
 
@@ -1145,7 +1359,7 @@ void display_show_calibration_complete(float capacity_ml)
     std::snprintf(
         capacity,
         sizeof(capacity),
-        "Capacity: %.0f ml",
+        "Got_it:%.0f_ml",
         capacity_ml
     );
 
@@ -1207,30 +1421,34 @@ void display_show_consumption_screen(
         static_cast<unsigned long>(consumed_ml)
     );
 
+    const double daily_consumed_l =
+        static_cast<double>(daily_consumed_ml) / 1000.0;
+
+    const double daily_goal_l =
+        static_cast<double>(daily_goal_ml) / 1000.0;
+
     std::snprintf(
         today_text,
         sizeof(today_text),
-        "%lu / %lu ml",
-        static_cast<unsigned long>(daily_consumed_ml),
-        static_cast<unsigned long>(daily_goal_ml)
+        "%.1f / %.1f L",
+        daily_consumed_l,
+        daily_goal_l
     );
 
     /*
      * Consumption screen layout is intentionally hard-coded so it does not
      * depend on JSON styling or reminder configuration.
      */
-    static constexpr int16_t CONSUMED_LABEL_X = 120;
-    static constexpr int16_t CONSUMED_LABEL_Y = 84;
+    
     static constexpr int16_t CONSUMED_VALUE_X = 120;
     static constexpr int16_t CONSUMED_VALUE_Y = 116;
-    static constexpr int16_t TODAY_LABEL_X = 120;
-    static constexpr int16_t TODAY_LABEL_Y = 157;
+    
     static constexpr int16_t TODAY_VALUE_X = 120;
     static constexpr int16_t TODAY_VALUE_Y = 185;
 
-    static constexpr uint16_t CONSUMED_LABEL_COLOR = 0; // White
+    
     static constexpr uint16_t CONSUMED_VALUE_COLOR = 0; // Cyan-blue
-    static constexpr uint16_t TODAY_LABEL_COLOR = 0;    // White
+        // White
     static constexpr uint16_t TODAY_VALUE_COLOR = 0;    // Yellow
 
     screen.loadFont(font_regular);
@@ -1238,25 +1456,13 @@ void display_show_consumption_screen(
     screen.setTextSize(1);
 
     /* Transparent text keeps the background image visible. */
-    screen.setTextColor(CONSUMED_LABEL_COLOR);
-    screen.drawString(
-        "Consumed",
-        CONSUMED_LABEL_X,
-        CONSUMED_LABEL_Y
-    );
+   
 
     screen.setTextColor(CONSUMED_VALUE_COLOR);
     screen.drawString(
         consumed_text,
         CONSUMED_VALUE_X,
         CONSUMED_VALUE_Y
-    );
-
-    screen.setTextColor(TODAY_LABEL_COLOR);
-    screen.drawString(
-        "Today",
-        TODAY_LABEL_X,
-        TODAY_LABEL_Y
     );
 
     screen.setTextColor(TODAY_VALUE_COLOR);

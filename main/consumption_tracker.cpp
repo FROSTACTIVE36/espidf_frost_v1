@@ -10,6 +10,7 @@
 #include "esp_timer.h"
 #include "nvs.h"
 #include "scale.hpp"
+#include "user_statistics.hpp"
 
 namespace
 {
@@ -384,6 +385,7 @@ void process_weight(float total_grams)
     {
         last_consumed_ml = static_cast<uint32_t>(std::lround(consumed_ml));
         daily_consumed_ml += last_consumed_ml;
+        user_statistics_add_hydration_ml(last_consumed_ml);
         save_daily();
 
         ESP_LOGI(

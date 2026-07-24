@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <atomic>
+#include <cstddef>
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -26,6 +27,7 @@
 #include "rtc_ds3231.hpp"
 #include "pomodoro.hpp"
 #include "bottle_calibration.hpp"
+#include "user_statistics.hpp"
 
 
 static const char *TAG = "FROST_BLE";
@@ -74,6 +76,7 @@ static uint8_t own_address_type = 0;
 static uint16_t command_value_handle = 0;
 
 static bool ble_initialized = false;
+static std::size_t statistics_line_cursor = 0;
 
 /*
  * BLE callbacks run in the NimBLE host task. Calibration changes the display,
@@ -475,6 +478,68 @@ static bool process_ble_command(
         return true;
     }
 
+
+
+    if (
+        strcmp(command, "STATS:GET") == 0 ||
+        strcmp(command, "STATS:TODAY") == 0
+    )
+    {
+        statistics_line_cursor = 0;
+
+        char response[128] = {};
+        if (!user_statistics_get_line(
+                statistics_line_cursor,
+                response,
+                sizeof(response)
+            ))
+        {
+            set_ble_status("ERROR:STATS_NOT_READY");
+            return false;
+        }
+
+        set_ble_status(response);
+        return true;
+    }
+
+    if (strcmp(command, "STATS:NEXT") == 0)
+    {
+        const std::size_t line_count =
+            user_statistics_line_count();
+
+        if (line_count == 0)
+        {
+            set_ble_status("ERROR:STATS_NOT_READY");
+            return false;
+        }
+
+        if (statistics_line_cursor + 1 < line_count)
+        {
+            ++statistics_line_cursor;
+        }
+
+        char response[128] = {};
+        if (!user_statistics_get_line(
+                statistics_line_cursor,
+                response,
+                sizeof(response)
+            ))
+        {
+            set_ble_status("ERROR:STATS_LINE");
+            return false;
+        }
+
+        set_ble_status(response);
+        return true;
+    }
+
+    if (strcmp(command, "STATS:RESET") == 0)
+    {
+        user_statistics_reset_today();
+        statistics_line_cursor = 0;
+        set_ble_status("STATS_RESET_OK");
+        return true;
+    }
 
     if (strcmp(command, "BOTTLE:LEARN_START") == 0)
     {

@@ -5,6 +5,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "user_statistics.hpp"
 
 static const char* TAG = "REMINDER_ENGINE";
 
@@ -321,6 +322,41 @@ static const char* reminder_type_name(
     }
 }
 
+
+static const char* statistics_token_id(
+    ReminderType type,
+    int item_index
+)
+{
+    if (item_index < 0)
+    {
+        return nullptr;
+    }
+
+    if (type == ReminderType::MEDICATION)
+    {
+        if (
+            static_cast<std::size_t>(item_index) <
+            medication_config.medicine_count
+        )
+        {
+            return medication_config.medicines[item_index].id;
+        }
+    }
+    else if (type == ReminderType::CUSTOM)
+    {
+        if (
+            static_cast<std::size_t>(item_index) <
+            custom_config.event_count
+        )
+        {
+            return custom_config.events[item_index].id;
+        }
+    }
+
+    return nullptr;
+}
+
 static bool queue_contains(
     ReminderType type,
     int item_index,
@@ -561,38 +597,41 @@ static void start_next_queued_reminder()
 
     QueuedReminder reminder;
 
-    bool reminder_available = false;
+    /*
+     * Priority 1:
+     * Always select the first queued medication reminder before any
+     * hydration, stretch, eye, walk, meditation, or custom reminder.
+     *
+     * This preserves the relative order of all non-medication reminders.
+     */
+    bool reminder_available =
+        dequeue_first_reminder_of_type(
+            ReminderType::MEDICATION,
+            reminder
+        );
 
-    if (medication_only_activation)
+    if (!reminder_available)
     {
         /*
-         * During Pomodoro focus, medication may bypass queued
-         * non-medication reminders. The skipped reminders stay queued.
+         * During Pomodoro focus, only medication reminders may become
+         * active. Non-medication reminders remain queued until focus ends.
          */
-        reminder_available =
-            dequeue_first_reminder_of_type(
-                ReminderType::MEDICATION,
-                reminder
-            );
-    }
-    else
-    {
+        if (medication_only_activation)
+        {
+            return;
+        }
+
+        /*
+         * No medication is waiting, so continue with normal FIFO order.
+         */
         reminder_available =
             dequeue_reminder(reminder);
     }
 
     if (!reminder_available)
     {
-        /*
-         * Do not clear ACK preview state merely because focus mode has
-         * temporarily blocked the queued non-medication reminders.
-         */
-        if (!medication_only_activation)
-        {
-            ack_preview_active = false;
-            ack_preview_remaining = 0;
-        }
-
+        ack_preview_active = false;
+        ack_preview_remaining = 0;
         return;
     }
 
@@ -1099,6 +1138,8 @@ void reminder_engine_init()
 
     medication_only_activation = false;
 
+    user_statistics_init();
+
     ESP_LOGI(TAG, "Reminder engine initialized");
 }
 
@@ -1237,14 +1278,33 @@ void reminder_engine_update(
     const uint64_t now_ms =
         current_millis();
 
+    user_statistics_update_day();
+
     if (active_reminder.active)
     {
-        if (
-            !active_reminder.require_ack &&
+        const bool timed_out =
+            active_reminder.display_ms > 0 &&
             now_ms - active_reminder.started_ms >=
-                active_reminder.display_ms
-        )
+                active_reminder.display_ms;
+
+        if (timed_out)
         {
+            /*
+             * Only reminders that were waiting for acknowledgement are
+             * counted as missed. Five-second queue previews and ordinary
+             * informational screens are not counted as misses.
+             */
+            if (active_reminder.require_ack)
+            {
+                user_statistics_record_miss(
+                    active_reminder.type,
+                    statistics_token_id(
+                        active_reminder.type,
+                        active_reminder.item_index
+                    )
+                );
+            }
+
             finish_active_reminder();
         }
     }
@@ -1328,6 +1388,14 @@ void reminder_engine_acknowledge_active()
         return;
     }
 
+    user_statistics_record_ack(
+        active_reminder.type,
+        statistics_token_id(
+            active_reminder.type,
+            active_reminder.item_index
+        )
+    );
+
     /*
      * Snapshot the queue before finishing the current reminder.
      * One ACK clears the current reminder normally, then every reminder
@@ -1389,6 +1457,13 @@ void reminder_engine_snooze_active()
         ESP_LOGW(TAG, "Medication snooze duration is zero");
         return;
     }
+
+    user_statistics_record_medication_snooze(
+        statistics_token_id(
+            active_reminder.type,
+            active_reminder.item_index
+        )
+    );
 
     QueuedReminder reminder;
 
