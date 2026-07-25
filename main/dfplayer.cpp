@@ -19,7 +19,7 @@ constexpr int BAUD_RATE = 9600;
 constexpr int RX_BUFFER_SIZE = 512;
 constexpr uint8_t FEEDBACK = 0x00;
 
-constexpr uint8_t CMD_PLAY_TRACK = 0x03;
+constexpr uint8_t CMD_PLAY_TRACK = 0x12;
 constexpr uint8_t CMD_SET_VOLUME = 0x06;
 constexpr uint8_t CMD_SELECT_DEVICE = 0x09;
 constexpr uint8_t CMD_RESUME = 0x0D;

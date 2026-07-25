@@ -54,7 +54,7 @@ AudioManagerConfig audio_config = {
  */
 constexpr uint16_t TONE_WELCOME      = 1;   // /mp3/0001.mp3
 constexpr uint16_t TONE_HYDRATION_1  = 11;  // /mp3/0011.mp3
-constexpr uint16_t TONE_HYDRATION_2  = 12;  // /mp3/0012.mp3
+//constexpr uint16_t TONE_HYDRATION_2  = 12;  // /mp3/0012.mp3
 constexpr uint16_t TONE_EYE          = 13;  // /mp3/0013.mp3
 constexpr uint16_t TONE_STRETCH      = 14;  // /mp3/0014.mp3
 constexpr uint16_t TONE_MEDICATION   = 15;  // /mp3/0015.mp3
@@ -68,11 +68,11 @@ constexpr uint16_t TONE_MEDITATION   = 22;  // /mp3/0022.mp3
 constexpr uint16_t TONE_CUSTOM       = 23;  // /mp3/0023.mp3
 constexpr uint16_t TONE_PLACE_BOTTLE = 24;  // /mp3/0024.mp3
 constexpr uint16_t TONE_ACK          = 30;  // /mp3/0030.mp3
-constexpr uint16_t TONE_CAL_REMOVE_BOTTLE = 20; // /mp3/0020.mp3
-constexpr uint16_t TONE_CAL_EMPTY_BOTTLE  = 21; // /mp3/0021.mp3
-constexpr uint16_t TONE_CAL_FULL_BOTTLE   = 22; // /mp3/0022.mp3
-constexpr uint16_t TONE_CAL_SUCCESS       = 23; // /mp3/0023.mp3
-constexpr uint16_t TONE_CAL_FAILED        = 24; // /mp3/0024.mp3
+constexpr uint16_t TONE_CAL_REMOVE_BOTTLE = 25; // /mp3/0020.mp3
+constexpr uint16_t TONE_CAL_EMPTY_BOTTLE  = 26; // /mp3/0021.mp3
+constexpr uint16_t TONE_CAL_FULL_BOTTLE   = 27; // /mp3/0022.mp3
+constexpr uint16_t TONE_CAL_SUCCESS       = 28; // /mp3/0023.mp3
+constexpr uint16_t TONE_CAL_FAILED        = 29; // /mp3/0024.mp3
 
 AudioBackgroundMode background_mode =
     AudioBackgroundMode::NONE;
@@ -821,6 +821,14 @@ void audio_manager_play_reminder(ReminderType type)
 {
     const uint16_t track =
         reminder_track(type);
+
+        ESP_LOGI(
+        TAG,
+        "REMINDER AUDIO: type=%u, selected track=%u",
+        static_cast<unsigned>(type),
+        static_cast<unsigned>(track)
+    );
+
 
     if (background_mode != AudioBackgroundMode::NONE)
     {

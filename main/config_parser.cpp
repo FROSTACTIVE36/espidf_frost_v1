@@ -1195,6 +1195,15 @@ static AudioManagerConfig parse_audio_config(
             config.pomodoro
         );
 
+    config.meditation =
+        parse_audio_playlist(
+            cJSON_GetObjectItemCaseSensitive(
+                audio_json,
+                "meditation"
+            ),
+            config.meditation
+        );
+
     /*
      * Accept both "healing" and the common misspelling "heling".
      */

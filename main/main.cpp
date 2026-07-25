@@ -372,6 +372,10 @@ static const char* REMINDER_JSON = R"json(
       "enabled": true,
       "tracks": [20, 21]
     },
+    "meditation": {
+      "enabled": true,
+      "tracks": [22]
+    },
     "healing": {
       "enabled": true,
       "require_dock": true,
