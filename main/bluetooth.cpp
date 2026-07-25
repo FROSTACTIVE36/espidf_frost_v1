@@ -34,6 +34,7 @@
 #include "statistics_history.hpp"
 #include "wifi_manager.hpp"
 #include "ota_manager.hpp"
+#include "action_log.hpp"
 #include <cstring>
 
 
@@ -1448,6 +1449,11 @@ static int gap_event_handler(
                 set_ble_status(
                     "OK:CONNECTED"
                 );
+
+                action_log_show_bluetooth(
+                    true,
+                    3000
+                );
             }
             else
             {
@@ -1471,6 +1477,11 @@ static int gap_event_handler(
             );
 
             reset_json_reception();
+
+            action_log_show_bluetooth(
+                false,
+                3000
+            );
 
             start_advertising();
 

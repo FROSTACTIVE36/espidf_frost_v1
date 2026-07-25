@@ -22,6 +22,7 @@ enum class ReminderType : uint8_t
     MEDITATION,
     MEDICATION,
     CUSTOM,
+    BOTTLE_CLEAN,
     COUNT
 };
 
@@ -204,6 +205,21 @@ struct CustomReminderConfig
 
     CustomEvent events[MAX_CUSTOM_EVENTS] = {};
     std::size_t event_count = 0;
+};
+
+
+/*
+ * Bottle-clean reminder. The interval is counted from configuration/boot
+ * in calendar days. No user-cleaning history is stored.
+ */
+struct BottleCleanConfig
+{
+    bool enabled = false;
+    uint16_t interval_days = 7;
+    uint8_t hour = 9;
+    uint8_t minute = 0;
+    uint32_t display_ms = 15000;
+    bool require_ack = true;
 };
 
 struct ActiveReminder

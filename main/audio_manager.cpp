@@ -148,6 +148,9 @@ uint16_t reminder_track(ReminderType type)
         case ReminderType::MEDICATION:
             return TONE_MEDICATION;
 
+        case ReminderType::BOTTLE_CLEAN:
+            return TONE_CLEAN_SOFT;
+
         default:
             return TONE_CUSTOM;
     }

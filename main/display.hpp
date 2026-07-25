@@ -16,6 +16,7 @@ void display_show_hydration_reminder();
 void display_show_stretch_reminder();
 void display_show_eye_reminder();
 void display_show_walk_reminder();
+void display_show_bottle_clean_reminder();
 
 void display_show_meditation_reminder();
 

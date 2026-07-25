@@ -19,6 +19,7 @@ bool ota_active = false;
 bool indeterminate = false;
 int progress_percentage = -1;
 uint64_t expires_at_ms = 0;
+uint64_t visible_since_ms = 0;
 char message[64] = {};
 
 uint64_t now_ms()
@@ -49,6 +50,7 @@ void action_log_init()
     indeterminate = false;
     progress_percentage = -1;
     expires_at_ms = 0;
+    visible_since_ms = 0;
     message[0] = '\0';
     taskEXIT_CRITICAL(&lock);
 }
@@ -70,6 +72,7 @@ void action_log_update()
         indeterminate = false;
         progress_percentage = -1;
         expires_at_ms = 0;
+        visible_since_ms = 0;
         message[0] = '\0';
     }
     taskEXIT_CRITICAL(&lock);
@@ -91,8 +94,41 @@ void action_log_show_bottle(const char* text, uint32_t duration_ms)
         source = ActionLogSource::BOTTLE;
         indeterminate = false;
         progress_percentage = -1;
-        expires_at_ms = now_ms() + duration_ms;
+        const uint64_t current = now_ms();
+        expires_at_ms = current + duration_ms;
+        visible_since_ms = current;
         copy_message(text);
+    }
+
+    taskEXIT_CRITICAL(&lock);
+}
+
+void action_log_show_bluetooth(bool connected, uint32_t duration_ms)
+{
+    if (!initialized)
+    {
+        action_log_init();
+    }
+
+    taskENTER_CRITICAL(&lock);
+
+    // OTA keeps priority over temporary Bluetooth messages.
+    if (!ota_active)
+    {
+        visible = true;
+        source = ActionLogSource::BLUETOOTH;
+        indeterminate = false;
+        progress_percentage = -1;
+
+        const uint64_t current = now_ms();
+        expires_at_ms = current + duration_ms;
+        visible_since_ms = current;
+
+        copy_message(
+            connected
+                ? "connected"
+                : "disconnected"
+        );
     }
 
     taskEXIT_CRITICAL(&lock);
@@ -112,6 +148,7 @@ void action_log_show_ota(const char* text, bool show_indeterminate)
     indeterminate = show_indeterminate;
     progress_percentage = -1;
     expires_at_ms = 0;
+    visible_since_ms = now_ms();
     copy_message(text);
     taskEXIT_CRITICAL(&lock);
 }
@@ -121,10 +158,15 @@ void action_log_show_ota_progress(int percentage)
     const int bounded = std::clamp(percentage, 0, 100);
 
     taskENTER_CRITICAL(&lock);
+    const bool starting_new_ota = !visible || source != ActionLogSource::OTA;
     visible = true;
     source = ActionLogSource::OTA;
     ota_active = true;
     indeterminate = false;
+    if (starting_new_ota)
+    {
+        visible_since_ms = now_ms();
+    }
     progress_percentage = bounded;
     expires_at_ms = 0;
 
@@ -142,7 +184,9 @@ void action_log_show_ota_result(const char* text, uint32_t duration_ms)
     ota_active = false;
     indeterminate = false;
     progress_percentage = 100;
-    expires_at_ms = now_ms() + duration_ms;
+    const uint64_t current = now_ms();
+    expires_at_ms = current + duration_ms;
+    visible_since_ms = current;
     copy_message(text);
     taskEXIT_CRITICAL(&lock);
 }
@@ -158,6 +202,7 @@ void action_log_clear_ota()
         indeterminate = false;
         progress_percentage = -1;
         expires_at_ms = 0;
+        visible_since_ms = 0;
         message[0] = '\0';
     }
     taskEXIT_CRITICAL(&lock);
@@ -183,7 +228,16 @@ bool action_log_get_snapshot(ActionLogSnapshot& snapshot)
     snapshot.ota_active = ota_active;
     snapshot.indeterminate = indeterminate;
     snapshot.progress_percentage = progress_percentage;
-    snapshot.animation_phase = static_cast<uint32_t>((now_ms() / 35ULL) % 360ULL);
+    const uint64_t current = now_ms();
+    snapshot.animation_phase = static_cast<uint32_t>((current / 35ULL) % 360ULL);
+    snapshot.visible_elapsed_ms =
+        (visible && visible_since_ms != 0 && current >= visible_since_ms)
+            ? static_cast<uint32_t>(std::min<uint64_t>(current - visible_since_ms, UINT32_MAX))
+            : 0;
+    snapshot.visible_remaining_ms =
+        (visible && !ota_active && expires_at_ms > current)
+            ? static_cast<uint32_t>(std::min<uint64_t>(expires_at_ms - current, UINT32_MAX))
+            : 0;
     std::strncpy(snapshot.message, message, sizeof(snapshot.message) - 1);
     snapshot.message[sizeof(snapshot.message) - 1] = '\0';
     taskEXIT_CRITICAL(&lock);

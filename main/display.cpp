@@ -25,6 +25,8 @@
 #include "images/pomodoro_focus_bg.h"
 #include "images/pomodoro_break_bg.h"
 #include "images/hydration_consumption.h"
+#include "images/bottle_clean.h"
+
 
 static const char *TAG = "FROST_DISPLAY";
 
@@ -365,6 +367,27 @@ void display_show_walk_reminder()
 
     display.endWrite();
 }
+
+void display_show_bottle_clean_reminder()
+{
+    if (!display_ready)
+    {
+        return;
+    }
+
+    display.startWrite();
+
+    display.pushImage(
+        0,
+        0,
+        240,
+        240,
+        bottle_clean_data
+    );
+
+    display.endWrite();
+}
+
 
 /* =========================================================
  * Reminder text helpers
@@ -1032,6 +1055,60 @@ void display_show_pomodoro_break(
     );
 }
 
+/*
+ * Action Log RGB565 colours in decimal format.
+ * Change only these values to customize the Dynamic Island colours.
+ */
+static constexpr uint16_t ACTION_LOG_BACKGROUND_COLOR = 0;      // Black
+static constexpr uint16_t ACTION_LOG_TEXT_COLOR = 65535;        // White
+static constexpr uint16_t ACTION_LOG_BOTTLE_COLOR = 65535;       // Green
+static constexpr uint16_t ACTION_LOG_BLUETOOTH_COLOR = 65504;      // Blue
+static constexpr uint16_t ACTION_LOG_OTA_COLOR = 2047;          // Cyan
+static constexpr uint16_t ACTION_LOG_WATER_COLOR = 65504;        // Cyan
+static constexpr uint16_t ACTION_LOG_SHADOW_COLOR = 0;       // Dark shadow
+static constexpr uint16_t ACTION_LOG_OUTLINE_COLOR = 0;     // Dark grey-blue
+static constexpr uint16_t ACTION_LOG_MUTED_COLOR = 31727;       // Dark grey
+
+static float action_log_smoothstep(float value)
+{
+    if (value <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    if (value >= 1.0f)
+    {
+        return 1.0f;
+    }
+
+    return value * value * (3.0f - (2.0f * value));
+}
+
+static void draw_action_log_bottle_icon(int center_x, int center_y, uint16_t color)
+{
+    // Small bottle silhouette designed for the compact island state.
+    screen.fillRoundRect(center_x - 4, center_y - 8, 8, 4, 1, color);
+    screen.fillRoundRect(center_x - 6, center_y - 5, 12, 14, 3, color);
+    screen.fillRect(center_x - 3, center_y - 10, 6, 3, color);
+
+    // Water line/detail.
+    screen.drawFastHLine(center_x - 4, center_y + 3, 8, ACTION_LOG_WATER_COLOR);
+}
+
+static void draw_action_log_bluetooth_icon(
+    int center_x,
+    int center_y,
+    uint16_t color
+)
+{
+    // Simple Bluetooth rune.
+    screen.drawFastVLine(center_x, center_y - 9, 19, color);
+    screen.drawLine(center_x, center_y - 9, center_x + 6, center_y - 3, color);
+    screen.drawLine(center_x + 6, center_y - 3, center_x - 5, center_y + 5, color);
+    screen.drawLine(center_x - 5, center_y - 5, center_x + 6, center_y + 3, color);
+    screen.drawLine(center_x + 6, center_y + 3, center_x, center_y + 9, color);
+}
+
 static void draw_action_log_overlay()
 {
     ActionLogSnapshot snapshot;
@@ -1041,66 +1118,199 @@ static void draw_action_log_overlay()
         return;
     }
 
-    // OTA uses the outer circular ring. Bottle events only show the panel.
-    if (snapshot.source == ActionLogSource::OTA)
+    /*
+     * Dynamic-Island-style presentation:
+     *   1. starts as a compact black pill,
+     *   2. expands smoothly to reveal the message,
+     *   3. collapses before a temporary bottle event disappears.
+     *
+     * This changes only the Action Log graphics. Bottle-clean remains a
+     * normal full-screen reminder like Walk, Stretch and Eye Break.
+     */
+    static constexpr uint32_t ENTER_ANIMATION_MS = 280;
+    static constexpr uint32_t EXIT_ANIMATION_MS = 220;
+
+    float expansion = action_log_smoothstep(
+        static_cast<float>(snapshot.visible_elapsed_ms) /
+        static_cast<float>(ENTER_ANIMATION_MS)
+    );
+
+    if (!snapshot.ota_active &&
+        snapshot.visible_remaining_ms > 0 &&
+        snapshot.visible_remaining_ms < EXIT_ANIMATION_MS)
     {
-        float start_angle = 270.0f;
-        float end_angle = start_angle;
+        const float exit_expansion = action_log_smoothstep(
+            static_cast<float>(snapshot.visible_remaining_ms) /
+            static_cast<float>(EXIT_ANIMATION_MS)
+        );
 
-        if (snapshot.indeterminate)
+        if (exit_expansion < expansion)
         {
-            start_angle = static_cast<float>(snapshot.animation_phase);
-            end_angle = start_angle + 72.0f;
-        }
-        else if (snapshot.progress_percentage >= 0)
-        {
-            end_angle = start_angle +
-                (static_cast<float>(snapshot.progress_percentage) / 100.0f) * 360.0f;
-        }
-
-        if (end_angle > start_angle)
-        {
-            screen.fillArc(
-                CLOCK_CENTER_X,
-                CLOCK_CENTER_Y,
-                CLOCK_PROGRESS_RADIUS,
-                CLOCK_PROGRESS_RADIUS + CLOCK_PROGRESS_WIDTH - 1,
-                start_angle,
-                end_angle,
-                TFT_CYAN
-            );
+            expansion = exit_expansion;
         }
     }
 
-    static constexpr int PANEL_X = 32;
-    static constexpr int PANEL_Y = 170;
-    static constexpr int PANEL_WIDTH = 176;
-    static constexpr int PANEL_HEIGHT = 34;
+    static constexpr int COMPACT_WIDTH = 42;
+    static constexpr int EXPANDED_WIDTH = 170;
+    static constexpr int COMPACT_HEIGHT = 28;
+    static constexpr int EXPANDED_HEIGHT = 42;
+    static constexpr int ISLAND_CENTER_X = 120;
+    static constexpr int ISLAND_BOTTOM_MARGIN = 30;
+
+    const int island_width = COMPACT_WIDTH + static_cast<int>(
+        static_cast<float>(EXPANDED_WIDTH - COMPACT_WIDTH) * expansion
+    );
+    const int island_height = COMPACT_HEIGHT + static_cast<int>(
+        static_cast<float>(EXPANDED_HEIGHT - COMPACT_HEIGHT) * expansion
+    );
+    const int island_x = ISLAND_CENTER_X - (island_width / 2);
+    const int island_y = DISPLAY_HEIGHT - ISLAND_BOTTOM_MARGIN - island_height;
+    const int corner_radius = island_height / 2;
+
+    // Soft shadow gives the island separation from the clock background.
+    screen.fillRoundRect(
+        island_x + 1,
+        island_y + 2,
+        island_width,
+        island_height,
+        corner_radius,
+        ACTION_LOG_SHADOW_COLOR
+    );
 
     screen.fillRoundRect(
-        PANEL_X,
-        PANEL_Y,
-        PANEL_WIDTH,
-        PANEL_HEIGHT,
-        10,
-        TFT_BLACK
+        island_x,
+        island_y,
+        island_width,
+        island_height,
+        corner_radius,
+        ACTION_LOG_BACKGROUND_COLOR
     );
 
-    screen.drawRoundRect(
-        PANEL_X,
-        PANEL_Y,
-        PANEL_WIDTH,
-        PANEL_HEIGHT,
-        10,
-        snapshot.source == ActionLogSource::OTA ? TFT_CYAN : TFT_DARKGREY
-    );
+    uint16_t accent = ACTION_LOG_BOTTLE_COLOR;
 
-    screen.loadFont(font_small);
-    screen.setTextDatum(lgfx::textdatum_t::middle_center);
-    screen.setTextColor(TFT_WHITE);
-    screen.setTextSize(1);
-    screen.drawString(snapshot.message, 120, PANEL_Y + PANEL_HEIGHT / 2);
-    screen.unloadFont();
+    if (snapshot.source == ActionLogSource::BLUETOOTH)
+    {
+        accent = ACTION_LOG_BLUETOOTH_COLOR;
+    }
+    else if (snapshot.source == ActionLogSource::OTA)
+    {
+        accent = ACTION_LOG_OTA_COLOR;
+    }
+
+    // A subtle outline appears as the island expands.
+    if (expansion > 0.35f)
+    {
+        screen.drawRoundRect(
+            island_x,
+            island_y,
+            island_width,
+            island_height,
+            corner_radius,
+            ACTION_LOG_OUTLINE_COLOR
+        );
+    }
+
+    int icon_x = ISLAND_CENTER_X;
+    if (expansion > 0.15f)
+    {
+        icon_x = island_x + 22;
+    }
+    const int icon_y = island_y + (island_height / 2);
+
+    // Only Bottle and Bluetooth use symbols inside the Action Log.
+    // OTA uses text only; its progress is shown by the full-screen arc.
+    if (snapshot.source == ActionLogSource::BLUETOOTH)
+    {
+        draw_action_log_bluetooth_icon(icon_x, icon_y, accent);
+    }
+    else if (snapshot.source == ActionLogSource::BOTTLE)
+    {
+        draw_action_log_bottle_icon(icon_x, icon_y, accent);
+    }
+
+    // Reveal text only after enough room exists, preventing overlap during entry.
+    if (expansion > 0.55f)
+    {
+        char display_message[30] = {};
+        std::snprintf(
+            display_message,
+            sizeof(display_message),
+            "%.27s",
+            snapshot.message
+        );
+
+        screen.loadFont(font_small);
+        screen.setTextDatum(lgfx::textdatum_t::middle_center);
+        screen.setTextColor(ACTION_LOG_TEXT_COLOR);
+        screen.setTextSize(1);
+
+        int text_center_x = ISLAND_CENTER_X;
+
+        if (snapshot.source == ActionLogSource::BOTTLE ||
+            snapshot.source == ActionLogSource::BLUETOOTH)
+        {
+            const int text_area_left = island_x + 39;
+            const int text_area_right = island_x + island_width - 10;
+            text_center_x = text_area_left +
+                ((text_area_right - text_area_left) / 2);
+        }
+
+        screen.drawString(
+            display_message,
+            text_center_x,
+            icon_y
+        );
+        screen.unloadFont();
+    }
+}
+
+static void draw_ota_full_screen_progress_arc()
+{
+    ActionLogSnapshot snapshot;
+
+    if (!action_log_get_snapshot(snapshot) ||
+        snapshot.source != ActionLogSource::OTA)
+    {
+        return;
+    }
+
+    static constexpr int ARC_RADIUS = 112;
+    static constexpr int ARC_WIDTH = 7;
+    static constexpr float ARC_START_ANGLE = 270.0f;
+
+    float arc_start = ARC_START_ANGLE;
+    float arc_end = ARC_START_ANGLE;
+
+    if (snapshot.indeterminate)
+    {
+        arc_start = static_cast<float>(snapshot.animation_phase);
+        arc_end = arc_start + 80.0f;
+    }
+    else if (snapshot.progress_percentage >= 0)
+    {
+        int percentage = snapshot.progress_percentage;
+
+        if (percentage > 100)
+        {
+            percentage = 100;
+        }
+
+        arc_end = ARC_START_ANGLE +
+            (static_cast<float>(percentage) / 100.0f) * 360.0f;
+    }
+
+    if (arc_end > arc_start)
+    {
+        screen.fillArc(
+            CLOCK_CENTER_X,
+            CLOCK_CENTER_Y,
+            ARC_RADIUS,
+            ARC_RADIUS + ARC_WIDTH - 1,
+            arc_start,
+            arc_end,
+            ACTION_LOG_OTA_COLOR
+        );
+    }
 }
 
 /* =========================================================
@@ -1172,6 +1382,7 @@ void display_show_home_clock(time_t current_time)
 
     screen.unloadFont();
 
+    draw_ota_full_screen_progress_arc();
     draw_action_log_overlay();
 
     // Push completed frame
@@ -1441,7 +1652,7 @@ static void draw_calibration_screen(
         DISPLAY_WIDTH / 2,
         DISPLAY_HEIGHT / 2,
         112,
-        TFT_DARKGREY
+        ACTION_LOG_MUTED_COLOR
     );
 
     display.startWrite();

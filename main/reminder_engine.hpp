@@ -57,6 +57,13 @@ void reminder_engine_set_custom_config(
 const CustomReminderConfig*
 reminder_engine_get_custom_config();
 
+void reminder_engine_set_bottle_clean_config(
+    const BottleCleanConfig& config
+);
+
+const BottleCleanConfig*
+reminder_engine_get_bottle_clean_config();
+
 /*
  * enabled = true:
  *   only medication reminders may become active; all other reminder

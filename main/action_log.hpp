@@ -7,6 +7,7 @@ enum class ActionLogSource : uint8_t
 {
     NONE = 0,
     BOTTLE,
+    BLUETOOTH,
     OTA
 };
 
@@ -18,6 +19,8 @@ struct ActionLogSnapshot
     bool indeterminate = false;
     int progress_percentage = -1;
     uint32_t animation_phase = 0;
+    uint32_t visible_elapsed_ms = 0;
+    uint32_t visible_remaining_ms = 0;
     char message[64] = {};
 };
 
@@ -26,6 +29,11 @@ void action_log_update();
 
 void action_log_show_bottle(
     const char* message,
+    uint32_t duration_ms = 2500
+);
+
+void action_log_show_bluetooth(
+    bool connected,
     uint32_t duration_ms = 2500
 );
 

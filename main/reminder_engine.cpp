@@ -35,6 +35,14 @@ struct MedicationDoseRuntime
     int last_trigger_minute = -1;
 };
 
+struct BottleCleanRuntime
+{
+    bool anchor_initialized = false;
+    int64_t anchor_day = 0;
+    int last_trigger_year = -1;
+    int last_trigger_year_day = -1;
+};
+
 struct CustomEventRuntime
 {
     int last_trigger_year = -1;
@@ -83,6 +91,9 @@ static MedicationDoseRuntime
 medication_runtime[MAX_MEDICINES][MAX_DOSES_PER_MEDICINE];
 
 static CustomReminderConfig custom_config;
+
+static BottleCleanConfig bottle_clean_config;
+static BottleCleanRuntime bottle_clean_runtime;
 
 static CustomEventRuntime
 custom_runtime[MAX_CUSTOM_EVENTS];
@@ -316,6 +327,9 @@ static const char* reminder_type_name(
 
         case ReminderType::CUSTOM:
             return "custom";
+
+        case ReminderType::BOTTLE_CLEAN:
+            return "bottle_clean";
 
         default:
             return "unknown";
@@ -991,6 +1005,75 @@ static void update_medication(
     }
 }
 
+static int64_t calendar_day_number(const std::tm& time_info)
+{
+    std::tm midnight = time_info;
+    midnight.tm_hour = 0;
+    midnight.tm_min = 0;
+    midnight.tm_sec = 0;
+    midnight.tm_isdst = -1;
+
+    const std::time_t value = std::mktime(&midnight);
+    if (value < 0)
+    {
+        return 0;
+    }
+
+    return static_cast<int64_t>(value / 86400);
+}
+
+static void update_bottle_clean(const std::tm& time_info)
+{
+    if (!bottle_clean_config.enabled || bottle_clean_config.interval_days == 0)
+    {
+        return;
+    }
+
+    const int64_t today = calendar_day_number(time_info);
+
+    if (!bottle_clean_runtime.anchor_initialized)
+    {
+        bottle_clean_runtime.anchor_initialized = true;
+        bottle_clean_runtime.anchor_day = today;
+        return;
+    }
+
+    if (
+        time_info.tm_hour != bottle_clean_config.hour ||
+        time_info.tm_min != bottle_clean_config.minute
+    )
+    {
+        return;
+    }
+
+    const bool already_fired =
+        bottle_clean_runtime.last_trigger_year == time_info.tm_year &&
+        bottle_clean_runtime.last_trigger_year_day == time_info.tm_yday;
+
+    if (already_fired)
+    {
+        return;
+    }
+
+    const int64_t elapsed_days = today - bottle_clean_runtime.anchor_day;
+    if (elapsed_days < static_cast<int64_t>(bottle_clean_config.interval_days))
+    {
+        return;
+    }
+
+    QueuedReminder reminder;
+    reminder.type = ReminderType::BOTTLE_CLEAN;
+    reminder.display_ms = bottle_clean_config.display_ms;
+    reminder.require_ack = bottle_clean_config.require_ack;
+
+    if (enqueue_reminder(reminder))
+    {
+        bottle_clean_runtime.last_trigger_year = time_info.tm_year;
+        bottle_clean_runtime.last_trigger_year_day = time_info.tm_yday;
+        bottle_clean_runtime.anchor_day = today;
+    }
+}
+
 static void update_custom(
     const std::tm& time_info
 )
@@ -1119,6 +1202,9 @@ void reminder_engine_init()
 
     custom_config = {};
 
+    bottle_clean_config = {};
+    bottle_clean_runtime = {};
+
     std::memset(
         custom_runtime,
         0xFF,
@@ -1244,6 +1330,20 @@ reminder_engine_get_custom_config()
     return &custom_config;
 }
 
+void reminder_engine_set_bottle_clean_config(
+    const BottleCleanConfig& config
+)
+{
+    bottle_clean_config = config;
+    bottle_clean_runtime = {};
+}
+
+const BottleCleanConfig*
+reminder_engine_get_bottle_clean_config()
+{
+    return &bottle_clean_config;
+}
+
 void reminder_engine_set_medication_only_activation(
     bool enabled
 )
@@ -1355,6 +1455,7 @@ void reminder_engine_update(
     update_meditation(time_info);
     update_medication(time_info);
     update_custom(time_info);
+    update_bottle_clean(time_info);
 
     start_next_queued_reminder();
 }

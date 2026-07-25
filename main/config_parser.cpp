@@ -459,6 +459,34 @@ config.start_hour =
     return config;
 }
 
+static BottleCleanConfig parse_bottle_clean_config(
+    const cJSON* bottle_clean_json
+)
+{
+    BottleCleanConfig config;
+
+    config.enabled = get_bool(bottle_clean_json, "enabled", false);
+
+    int interval_days = get_int(bottle_clean_json, "interval_days", 7);
+    if (interval_days < 1) interval_days = 1;
+    if (interval_days > 365) interval_days = 365;
+    config.interval_days = static_cast<uint16_t>(interval_days);
+
+    int hour = get_int(bottle_clean_json, "hour", 9);
+    int minute = get_int(bottle_clean_json, "minute", 0);
+    if (hour < 0 || hour > 23) hour = 9;
+    if (minute < 0 || minute > 59) minute = 0;
+    config.hour = static_cast<uint8_t>(hour);
+    config.minute = static_cast<uint8_t>(minute);
+
+    int display_ms = get_int(bottle_clean_json, "display_ms", 15000);
+    if (display_ms < 0) display_ms = 0;
+    config.display_ms = static_cast<uint32_t>(display_ms);
+
+    config.require_ack = get_bool(bottle_clean_json, "require_ack", true);
+    return config;
+}
+
 static MeditationConfig parse_meditation_config(
     const cJSON* meditation_json
 )
@@ -1725,6 +1753,19 @@ bool reminder_config_parse_and_apply(
         reminder_engine_set_config(
             mapping.type,
             parse_standard_config(item)
+        );
+    }
+
+    const cJSON* bottle_clean =
+        cJSON_GetObjectItemCaseSensitive(
+            reminders,
+            "bottle_clean"
+        );
+
+    if (cJSON_IsObject(bottle_clean))
+    {
+        reminder_engine_set_bottle_clean_config(
+            parse_bottle_clean_config(bottle_clean)
         );
     }
 

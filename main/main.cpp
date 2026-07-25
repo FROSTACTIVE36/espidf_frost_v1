@@ -143,8 +143,8 @@ static void update_shared_ir_dock_state()
 
     action_log_show_bottle(
         dock_reported_state
-            ? "Bottle detected"
-            : "Bottle removed"
+            ? "detected"
+            : "removed"
     );
 
     audio_manager_set_dock_state(dock_reported_state);
@@ -220,6 +220,16 @@ static const char* REMINDER_JSON = R"json(
       "end_hour": 23,
       "end_min": 59,
       "days": []
+    },
+
+
+    "bottle_clean": {
+      "enabled": true,
+      "interval_days": 7,
+      "hour": 17,
+      "minute": 0,
+      "display_ms": 15000,
+      "require_ack": true
     },
 
     "meditation": {
@@ -515,6 +525,13 @@ static void on_reminder_triggered(
 
             display_show_walk_reminder();
 
+            break;
+        }
+
+        case ReminderType::BOTTLE_CLEAN:
+        {
+            ESP_LOGI(TAG, "Showing bottle-clean reminder");
+            display_show_bottle_clean_reminder();
             break;
         }
 
