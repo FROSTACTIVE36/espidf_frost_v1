@@ -142,14 +142,33 @@ void action_log_show_ota(const char* text, bool show_indeterminate)
     }
 
     taskENTER_CRITICAL(&lock);
+
+    const bool starting_new_ota =
+        !visible ||
+        source != ActionLogSource::OTA;
+
     visible = true;
     source = ActionLogSource::OTA;
     ota_active = true;
     indeterminate = show_indeterminate;
     progress_percentage = -1;
     expires_at_ms = 0;
-    visible_since_ms = now_ms();
+
+    /*
+     * Preserve the existing Dynamic Island animation while OTA changes
+     * state, for example:
+     *
+     * WiFi connecting -> Checking update -> Downloading.
+     *
+     * Reset the entry animation only when OTA first becomes visible.
+     */
+    if (starting_new_ota)
+    {
+        visible_since_ms = now_ms();
+    }
+
     copy_message(text);
+
     taskEXIT_CRITICAL(&lock);
 }
 

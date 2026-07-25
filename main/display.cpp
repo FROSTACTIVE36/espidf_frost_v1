@@ -7,6 +7,7 @@
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "LovyanGFX.hpp"
 
 #include "images/frost_logo.h"
@@ -1277,37 +1278,126 @@ static void draw_ota_full_screen_progress_arc()
     static constexpr int ARC_RADIUS = 112;
     static constexpr int ARC_WIDTH = 7;
     static constexpr float ARC_START_ANGLE = 270.0f;
+    static constexpr float INDETERMINATE_ARC_LENGTH = 80.0f;
+    static constexpr uint64_t INDETERMINATE_ROTATION_MS = 1500ULL;
 
-    float arc_start = ARC_START_ANGLE;
-    float arc_end = ARC_START_ANGLE;
-
+    /*
+     * Wi-Fi connecting and update checking are indeterminate states.
+     * Generate their animation directly from system time so the arc keeps
+     * rotating even when the OTA task does not publish repeated progress
+     * updates.
+     */
     if (snapshot.indeterminate)
     {
-        arc_start = static_cast<float>(snapshot.animation_phase);
-        arc_end = arc_start + 80.0f;
-    }
-    else if (snapshot.progress_percentage >= 0)
-    {
-        int percentage = snapshot.progress_percentage;
+        const uint64_t animation_ms =
+            static_cast<uint64_t>(esp_timer_get_time() / 1000ULL);
 
-        if (percentage > 100)
+        const float rotation =
+            static_cast<float>(
+                animation_ms % INDETERMINATE_ROTATION_MS
+            ) /
+            static_cast<float>(INDETERMINATE_ROTATION_MS);
+
+        const float arc_start = rotation * 360.0f;
+        const float arc_end =
+            arc_start + INDETERMINATE_ARC_LENGTH;
+
+        if (arc_end <= 360.0f)
         {
-            percentage = 100;
+            screen.fillArc(
+                CLOCK_CENTER_X,
+                CLOCK_CENTER_Y,
+                ARC_RADIUS,
+                ARC_RADIUS + ARC_WIDTH - 1,
+                arc_start,
+                arc_end,
+                ACTION_LOG_OTA_COLOR
+            );
+        }
+        else
+        {
+            screen.fillArc(
+                CLOCK_CENTER_X,
+                CLOCK_CENTER_Y,
+                ARC_RADIUS,
+                ARC_RADIUS + ARC_WIDTH - 1,
+                arc_start,
+                360.0f,
+                ACTION_LOG_OTA_COLOR
+            );
+
+            screen.fillArc(
+                CLOCK_CENTER_X,
+                CLOCK_CENTER_Y,
+                ARC_RADIUS,
+                ARC_RADIUS + ARC_WIDTH - 1,
+                0.0f,
+                arc_end - 360.0f,
+                ACTION_LOG_OTA_COLOR
+            );
         }
 
-        arc_end = ARC_START_ANGLE +
-            (static_cast<float>(percentage) / 100.0f) * 360.0f;
+        return;
     }
 
-    if (arc_end > arc_start)
+    if (snapshot.progress_percentage < 0)
+    {
+        return;
+    }
+
+    int percentage = snapshot.progress_percentage;
+
+    if (percentage < 0)
+    {
+        percentage = 0;
+    }
+    else if (percentage > 100)
+    {
+        percentage = 100;
+    }
+
+    if (percentage == 0)
+    {
+        return;
+    }
+
+    const float progress_degrees =
+        (static_cast<float>(percentage) / 100.0f) * 360.0f;
+
+    const float arc_end =
+        ARC_START_ANGLE + progress_degrees;
+
+    if (arc_end <= 360.0f)
     {
         screen.fillArc(
             CLOCK_CENTER_X,
             CLOCK_CENTER_Y,
             ARC_RADIUS,
             ARC_RADIUS + ARC_WIDTH - 1,
-            arc_start,
+            ARC_START_ANGLE,
             arc_end,
+            ACTION_LOG_OTA_COLOR
+        );
+    }
+    else
+    {
+        screen.fillArc(
+            CLOCK_CENTER_X,
+            CLOCK_CENTER_Y,
+            ARC_RADIUS,
+            ARC_RADIUS + ARC_WIDTH - 1,
+            ARC_START_ANGLE,
+            360.0f,
+            ACTION_LOG_OTA_COLOR
+        );
+
+        screen.fillArc(
+            CLOCK_CENTER_X,
+            CLOCK_CENTER_Y,
+            ARC_RADIUS,
+            ARC_RADIUS + ARC_WIDTH - 1,
+            0.0f,
+            arc_end - 360.0f,
             ACTION_LOG_OTA_COLOR
         );
     }

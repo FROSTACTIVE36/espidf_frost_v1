@@ -370,14 +370,18 @@ void ota_task(void*)
             continue;
         }
 
-        action_log_show_ota("Update available", false);
-
         if (request == Request::CHECK)
         {
+            action_log_show_ota_result("Update available", 3000);
             busy.store(false);
             continue;
         }
 
+        /*
+         * For a START request, transition directly from "Checking update..."
+         * to "Downloading 0%" inside perform_update(). This keeps the
+         * Action Log continuous and avoids an unnecessary intermediate state.
+         */
         if (!perform_update(firmware_url))
         {
             if (cancel_requested.load())
@@ -422,7 +426,30 @@ esp_err_t ota_manager_init()
         return ESP_ERR_NO_MEM;
     }
 
-    if (xTaskCreatePinnedToCore(ota_task, "ota_task", 12288, nullptr, 5, &task_handle, 0) != pdPASS)
+    /*
+     * Keep OTA work away from the main UI task.
+     *
+     * app_main and all LovyanGFX rendering run on Core 0. During version
+     * checking and esp_https_ota_begin(), TLS/HTTP calls may remain runnable
+     * for long periods. A higher-priority OTA task on the same core can then
+     * starve the display task and make the Action Log appear frozen.
+     *
+     * Run OTA on Core 1 at a moderate priority so the display continues
+     * refreshing smoothly during:
+     *
+     * WiFi connecting -> Checking update -> Downloading.
+     */
+    if (
+        xTaskCreatePinnedToCore(
+            ota_task,
+            "ota_task",
+            12288,
+            nullptr,
+            3,
+            &task_handle,
+            1
+        ) != pdPASS
+    )
     {
         vQueueDelete(request_queue);
         request_queue = nullptr;
