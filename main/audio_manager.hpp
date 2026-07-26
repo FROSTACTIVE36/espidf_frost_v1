@@ -62,6 +62,9 @@ void audio_manager_set_config(
 
 const AudioManagerConfig& audio_manager_get_config();
 
+bool audio_manager_set_volume(uint8_t volume);
+uint8_t audio_manager_get_volume();
+
 void audio_manager_start_pomodoro();
 void audio_manager_start_pomodoro_focus();
 void audio_manager_start_pomodoro_break();

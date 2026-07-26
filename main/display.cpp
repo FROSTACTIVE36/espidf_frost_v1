@@ -1064,6 +1064,7 @@ static constexpr uint16_t ACTION_LOG_BACKGROUND_COLOR = 0;      // Black
 static constexpr uint16_t ACTION_LOG_TEXT_COLOR = 65535;        // White
 static constexpr uint16_t ACTION_LOG_BOTTLE_COLOR = 65535;       // Green
 static constexpr uint16_t ACTION_LOG_BLUETOOTH_COLOR = 65504;      // Blue
+static constexpr uint16_t ACTION_LOG_VOLUME_COLOR = 65535;         // White
 static constexpr uint16_t ACTION_LOG_OTA_COLOR = 2047;          // Cyan
 static constexpr uint16_t ACTION_LOG_WATER_COLOR = 65504;        // Cyan
 static constexpr uint16_t ACTION_LOG_SHADOW_COLOR = 0;       // Dark shadow
@@ -1108,6 +1109,37 @@ static void draw_action_log_bluetooth_icon(
     screen.drawLine(center_x + 6, center_y - 3, center_x - 5, center_y + 5, color);
     screen.drawLine(center_x - 5, center_y - 5, center_x + 6, center_y + 3, color);
     screen.drawLine(center_x + 6, center_y + 3, center_x, center_y + 9, color);
+}
+
+static void draw_action_log_volume_icon(
+    int center_x,
+    int center_y,
+    uint16_t color,
+    bool muted
+)
+{
+    screen.fillRect(center_x - 8, center_y - 3, 4, 7, color);
+    screen.fillTriangle(
+        center_x - 4, center_y - 5,
+        center_x + 2, center_y - 9,
+        center_x + 2, center_y + 9,
+        color
+    );
+
+    if (muted)
+    {
+        screen.drawLine(center_x + 5, center_y - 5, center_x + 11, center_y + 5, color);
+        screen.drawLine(center_x + 11, center_y - 5, center_x + 5, center_y + 5, color);
+        return;
+    }
+
+    screen.drawLine(center_x + 5, center_y - 4, center_x + 8, center_y - 1, color);
+    screen.drawFastVLine(center_x + 8, center_y - 1, 3, color);
+    screen.drawLine(center_x + 8, center_y + 1, center_x + 5, center_y + 4, color);
+
+    screen.drawLine(center_x + 9, center_y - 7, center_x + 12, center_y - 4, color);
+    screen.drawFastVLine(center_x + 12, center_y - 4, 9, color);
+    screen.drawLine(center_x + 12, center_y + 4, center_x + 9, center_y + 7, color);
 }
 
 static void draw_action_log_overlay()
@@ -1193,6 +1225,10 @@ static void draw_action_log_overlay()
     {
         accent = ACTION_LOG_BLUETOOTH_COLOR;
     }
+    else if (snapshot.source == ActionLogSource::VOLUME)
+    {
+        accent = ACTION_LOG_VOLUME_COLOR;
+    }
     else if (snapshot.source == ActionLogSource::OTA)
     {
         accent = ACTION_LOG_OTA_COLOR;
@@ -1218,7 +1254,7 @@ static void draw_action_log_overlay()
     }
     const int icon_y = island_y + (island_height / 2);
 
-    // Only Bottle and Bluetooth use symbols inside the Action Log.
+    // Bottle, Bluetooth and Volume use symbols inside the Action Log.
     // OTA uses text only; its progress is shown by the full-screen arc.
     if (snapshot.source == ActionLogSource::BLUETOOTH)
     {
@@ -1227,6 +1263,11 @@ static void draw_action_log_overlay()
     else if (snapshot.source == ActionLogSource::BOTTLE)
     {
         draw_action_log_bottle_icon(icon_x, icon_y, accent);
+    }
+    else if (snapshot.source == ActionLogSource::VOLUME)
+    {
+        const bool muted = std::strcmp(snapshot.message, "Muted") == 0;
+        draw_action_log_volume_icon(icon_x, icon_y, accent, muted);
     }
 
     // Reveal text only after enough room exists, preventing overlap during entry.
@@ -1248,7 +1289,8 @@ static void draw_action_log_overlay()
         int text_center_x = ISLAND_CENTER_X;
 
         if (snapshot.source == ActionLogSource::BOTTLE ||
-            snapshot.source == ActionLogSource::BLUETOOTH)
+            snapshot.source == ActionLogSource::BLUETOOTH ||
+            snapshot.source == ActionLogSource::VOLUME)
         {
             const int text_area_left = island_x + 39;
             const int text_area_right = island_x + island_width - 10;

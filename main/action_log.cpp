@@ -134,6 +134,58 @@ void action_log_show_bluetooth(bool connected, uint32_t duration_ms)
     taskEXIT_CRITICAL(&lock);
 }
 
+void action_log_show_volume(uint8_t volume, uint32_t duration_ms)
+{
+    if (!initialized)
+    {
+        action_log_init();
+    }
+
+    taskENTER_CRITICAL(&lock);
+
+    // OTA always keeps display priority over temporary volume notifications.
+    if (!ota_active)
+    {
+        visible = true;
+
+        /*
+         * Reuse the existing Bluetooth Action Log presentation so no display
+         * changes are required. The message identifies this as a volume event.
+         */
+        source = ActionLogSource::VOLUME;
+        indeterminate = false;
+        progress_percentage = -1;
+
+        const uint64_t current = now_ms();
+        expires_at_ms = current + duration_ms;
+        visible_since_ms = current;
+
+        char volume_message[64] = {};
+
+        if (volume == 0)
+        {
+            std::snprintf(
+                volume_message,
+                sizeof(volume_message),
+                "Muted"
+            );
+        }
+        else
+        {
+            std::snprintf(
+                volume_message,
+                sizeof(volume_message),
+                "Volume %u",
+                static_cast<unsigned>(volume)
+            );
+        }
+
+        copy_message(volume_message);
+    }
+
+    taskEXIT_CRITICAL(&lock);
+}
+
 void action_log_show_ota(const char* text, bool show_indeterminate)
 {
     if (!initialized)

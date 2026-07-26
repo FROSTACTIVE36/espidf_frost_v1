@@ -622,6 +622,51 @@ const AudioManagerConfig& audio_manager_get_config()
     return audio_config;
 }
 
+bool audio_manager_set_volume(uint8_t volume)
+{
+    if (volume > 30)
+    {
+        ESP_LOGW(
+            TAG,
+            "Rejected volume=%u; valid range is 0..30",
+            static_cast<unsigned>(volume)
+        );
+
+        return false;
+    }
+
+    audio_config.volume = volume;
+
+    const esp_err_t result =
+        dfplayer_set_volume(volume);
+
+    if (result != ESP_OK)
+    {
+        ESP_LOGE(
+            TAG,
+            "DFPlayer volume command failed for volume=%u: %s",
+            static_cast<unsigned>(volume),
+            esp_err_to_name(result)
+        );
+
+        return false;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "Volume set to %u%s",
+        static_cast<unsigned>(volume),
+        volume == 0 ? " (muted)" : ""
+    );
+
+    return true;
+}
+
+uint8_t audio_manager_get_volume()
+{
+    return audio_config.volume;
+}
+
 void audio_manager_update(time_t now)
 {
     update_healing_schedule(now);

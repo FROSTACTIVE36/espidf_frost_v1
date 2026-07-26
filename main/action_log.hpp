@@ -8,6 +8,7 @@ enum class ActionLogSource : uint8_t
     NONE = 0,
     BOTTLE,
     BLUETOOTH,
+    VOLUME,
     OTA
 };
 
@@ -35,6 +36,11 @@ void action_log_show_bottle(
 void action_log_show_bluetooth(
     bool connected,
     uint32_t duration_ms = 2500
+);
+
+void action_log_show_volume(
+    uint8_t volume,
+    uint32_t duration_ms = 3000
 );
 
 void action_log_show_ota(

@@ -35,6 +35,7 @@
 #include "wifi_manager.hpp"
 #include "ota_manager.hpp"
 #include "action_log.hpp"
+#include "audio_manager.hpp"
 #include <cstring>
 
 
@@ -908,6 +909,102 @@ static bool process_ble_command(
         const bool accepted = ota_manager_request_cancel();
         set_ble_status(accepted ? "OK:OTA_CANCEL_REQUESTED" : "ERROR:OTA_NOT_ACTIVE");
         return accepted;
+    }
+
+    /*
+     * Audio volume command:
+     *
+     * SET VOLUME 25
+     *
+     * Valid DFPlayer range: 0..30.
+     * Volume 0 is treated as muted.
+     */
+    static constexpr char volume_set_prefix[] =
+        "SET VOLUME ";
+
+    static constexpr size_t volume_set_prefix_length =
+        sizeof(volume_set_prefix) - 1;
+
+    if (
+        strncmp(
+            command,
+            volume_set_prefix,
+            volume_set_prefix_length
+        ) == 0
+    )
+    {
+        const char* value_text =
+            command + volume_set_prefix_length;
+
+        if (value_text[0] == '\0')
+        {
+            set_ble_status("ERROR:VOLUME_FORMAT");
+            return false;
+        }
+
+        char* end_pointer = nullptr;
+
+        const long requested_volume =
+            std::strtol(
+                value_text,
+                &end_pointer,
+                10
+            );
+
+        if (
+            end_pointer == value_text ||
+            end_pointer == nullptr ||
+            *end_pointer != '\0'
+        )
+        {
+            set_ble_status("ERROR:VOLUME_FORMAT");
+            return false;
+        }
+
+        if (
+            requested_volume < 0 ||
+            requested_volume > 30
+        )
+        {
+            set_ble_status("ERROR:VOLUME_RANGE");
+            return false;
+        }
+
+        const uint8_t volume =
+            static_cast<uint8_t>(
+                requested_volume
+            );
+
+        if (!audio_manager_set_volume(volume))
+        {
+            set_ble_status("ERROR:VOLUME_SET");
+            return false;
+        }
+
+        action_log_show_volume(
+            volume,
+            3000
+        );
+
+        char response[32] = {};
+
+        std::snprintf(
+            response,
+            sizeof(response),
+            "OK:VOLUME:%u",
+            static_cast<unsigned>(volume)
+        );
+
+        set_ble_status(response);
+
+        ESP_LOGI(
+            TAG,
+            "Volume command applied: %u%s",
+            static_cast<unsigned>(volume),
+            volume == 0 ? " (muted)" : ""
+        );
+
+        return true;
     }
 
     /*
