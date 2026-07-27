@@ -95,7 +95,7 @@ void enter_state(BottleCalibrationState next)
             break;
 
         case BottleCalibrationState::TARING:
-            display_show_calibration_measuring("TARING", "Keep dock empty");
+            display_show_calibration_measuring("Balancing", "Keep dock empty");
             break;
 
         case BottleCalibrationState::WAIT_EMPTY_BOTTLE:

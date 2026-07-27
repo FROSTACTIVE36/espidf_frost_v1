@@ -21,6 +21,7 @@ void consumption_tracker_set_docked(bool docked);
 void consumption_tracker_set_initial_remaining(float remaining_ml);
 void consumption_tracker_update();
 
+bool consumption_tracker_is_busy();
 bool consumption_tracker_screen_active();
 void consumption_tracker_render_screen();
 

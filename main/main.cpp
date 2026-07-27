@@ -533,6 +533,12 @@ static uint64_t last_idle_display_ms = 0;
 static uint64_t last_reminder_update_ms = 0;
 static uint64_t last_statistics_update_ms = 0;
 
+/*
+ * Tracks the Action Log visibility edge so the display can immediately
+ * redraw a clean home frame when the island finishes collapsing.
+ */
+static bool previous_action_log_visible = false;
+
 
 /* =========================================================
  * Pomodoro double-tap detection
@@ -2274,10 +2280,18 @@ extern "C" void app_main()
                     break;
                 }
 
+                /*
+                 * A bottle edge starts the tracker, but SETTLING and
+                 * MEASURING continue after the IR flags clear.
+                 */
+                const bool consumption_tracker_busy =
+                    consumption_tracker_is_busy();
+
                 if (
                     ir_activity_pending ||
                     dock_state_changed ||
-                    dock_stability_pending
+                    dock_stability_pending ||
+                    consumption_tracker_busy
                 )
                 {
                     consumption_tracker_set_enabled(true);
@@ -2300,18 +2314,52 @@ extern "C" void app_main()
                     break;
                 }
 
-                const uint32_t display_interval_ms =
-                    action_log_is_visible()
-                        ? ACTION_LOG_DISPLAY_INTERVAL_MS
-                        : IDLE_DISPLAY_INTERVAL_MS;
+                const bool action_log_visible =
+                    action_log_is_visible();
 
-                if (
-                    current_ms - last_idle_display_ms >=
-                    display_interval_ms
-                )
+                const bool action_log_just_closed =
+                    previous_action_log_visible &&
+                    !action_log_visible;
+
+                previous_action_log_visible =
+                    action_log_visible;
+
+                /*
+                 * When the Action Log disappears, immediately push one clean
+                 * home frame. Without this, the refresh interval changes from
+                 * 50 ms to 250 ms at exactly the same moment, which can leave
+                 * the final partially-collapsed island visible for up to one
+                 * idle refresh period.
+                 */
+                if (action_log_just_closed)
                 {
-                    last_idle_display_ms = current_ms;
-                    display_show_home_clock(now);
+                    last_idle_display_ms =
+                        current_ms;
+
+                    display_show_home_clock(
+                        now
+                    );
+                }
+                else
+                {
+                    const uint32_t display_interval_ms =
+                        action_log_visible
+                            ? ACTION_LOG_DISPLAY_INTERVAL_MS
+                            : IDLE_DISPLAY_INTERVAL_MS;
+
+                    if (
+                        current_ms -
+                            last_idle_display_ms >=
+                        display_interval_ms
+                    )
+                    {
+                        last_idle_display_ms =
+                            current_ms;
+
+                        display_show_home_clock(
+                            now
+                        );
+                    }
                 }
 
                 ir_activity_pending = false;

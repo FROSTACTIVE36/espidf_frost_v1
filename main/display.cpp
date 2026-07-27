@@ -1759,9 +1759,9 @@ static void draw_calibration_screen(
 
     draw_calibration_text_block(
         heading != nullptr ? heading : "",
-        45,
+        50,
         145,
-        TFT_WHITE
+        TFT_CYAN
     );
 
     draw_calibration_text_block(
@@ -1795,16 +1795,16 @@ static void draw_calibration_screen(
 void display_show_calibration_remove_bottle()
 {
     draw_calibration_screen(
-        "CALIBRATION",
+        "SCALING",
         "REMOVE BOTTLE",
-        "Preparing tare "
+        "Preparing to tune "
     );
 }
 
 void display_show_calibration_place_empty()
 {
     draw_calibration_screen(
-        "CALIBRATION",
+        "SCALING",
         "place empty bottle",
         "Keep it on the dock"
     );
@@ -1813,7 +1813,7 @@ void display_show_calibration_place_empty()
 void display_show_calibration_fill_bottle()
 {
     draw_calibration_screen(
-        "CALIBRATION",
+        "SCALING",
         "Remove bottle & fill",
         "it completely"
     );
@@ -1822,7 +1822,7 @@ void display_show_calibration_fill_bottle()
 void display_show_calibration_place_full()
 {
     draw_calibration_screen(
-        "CALIBRATION",
+        "SCALING",
         "Place full bottle",
         "on the dock"
     );
@@ -1834,7 +1834,7 @@ void display_show_calibration_measuring(
 )
 {
     draw_calibration_screen(
-        "MEASURING",
+        "TUNING",
         title,
         subtitle
     );
@@ -1861,7 +1861,7 @@ void display_show_calibration_complete(float capacity_ml)
 void display_show_calibration_error(const char* message)
 {
     draw_calibration_screen(
-        "CALIBRATION",
+        "SCALING",
         "ERROR",
         message != nullptr ? message : "Try again"
     );
@@ -1928,11 +1928,11 @@ void display_show_consumption_screen(
      * depend on JSON styling or reminder configuration.
      */
     
-    static constexpr int16_t CONSUMED_VALUE_X = 120;
-    static constexpr int16_t CONSUMED_VALUE_Y = 116;
+    static constexpr int16_t CONSUMED_VALUE_X = 90;
+    static constexpr int16_t CONSUMED_VALUE_Y = 152;
     
-    static constexpr int16_t TODAY_VALUE_X = 120;
-    static constexpr int16_t TODAY_VALUE_Y = 185;
+    static constexpr int16_t TODAY_VALUE_X = 100;
+    static constexpr int16_t TODAY_VALUE_Y = 108;
 
     
     static constexpr uint16_t CONSUMED_VALUE_COLOR = 0; // Cyan-blue

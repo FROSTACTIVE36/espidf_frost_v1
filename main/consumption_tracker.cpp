@@ -591,6 +591,18 @@ void consumption_tracker_update()
     process_weight(total_grams);
 }
 
+bool consumption_tracker_is_busy()
+{
+    if (!initialized || !tracking_enabled)
+    {
+        return false;
+    }
+
+    return
+        state == TrackerState::SETTLING ||
+        state == TrackerState::MEASURING;
+}
+
 bool consumption_tracker_screen_active()
 {
     return screen_active;
