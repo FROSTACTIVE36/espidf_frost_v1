@@ -3,7 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
-
+#include <cstring>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
+#include "sdkconfig.h"
 
 #include "acknowledgement_input.hpp"
 #include "audio_manager.hpp"
@@ -40,6 +41,456 @@
 static const char* TAG = "FROST_MAIN";
 
 /* =========================================================
+ * Top-level system state machine
+ * ========================================================= */
+
+enum class SystemState : uint8_t
+{
+    IDLE = 0,
+    REMINDER,
+    POMODORO,
+    CALIBRATION,
+    OTA,
+    CONSUMPTION
+};
+
+static SystemState system_state = SystemState::IDLE;
+
+static constexpr uint32_t MAIN_LOOP_PERIOD_MS = 20;
+static constexpr uint32_t SYSTEM_DIAGNOSTIC_INTERVAL_MS = 5000;
+
+static uint64_t state_entered_ms = 0;
+static uint64_t diagnostic_window_started_us = 0;
+static uint64_t diagnostic_busy_us = 0;
+static uint32_t diagnostic_loop_count = 0;
+
+/*
+ * True per-core CPU usage is derived from FreeRTOS run-time statistics.
+ *
+ * IDLE0 and IDLE1 are pinned to Core 0 and Core 1 respectively, so:
+ *
+ *     CPU usage = 100% - idle percentage
+ *
+ * We use deltas between diagnostic windows rather than percentages since
+ * boot. This makes the values represent the current 5-second state.
+ *
+ * The storage is static so diagnostics do not consume the main task stack.
+ */
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+static constexpr UBaseType_t CPU_STATS_MAX_TASKS = 48;
+static TaskStatus_t cpu_task_status[CPU_STATS_MAX_TASKS] = {};
+
+static uint64_t previous_total_runtime = 0;
+static uint64_t previous_idle0_runtime = 0;
+static uint64_t previous_idle1_runtime = 0;
+static bool cpu_runtime_baseline_valid = false;
+#endif
+
+static const char* system_state_name(SystemState state)
+{
+    switch (state)
+    {
+        case SystemState::IDLE:
+            return "IDLE";
+
+        case SystemState::REMINDER:
+            return "REMINDER";
+
+        case SystemState::POMODORO:
+            return "POMODORO";
+
+        case SystemState::CALIBRATION:
+            return "CALIBRATION";
+
+        case SystemState::OTA:
+            return "OTA";
+
+        case SystemState::CONSUMPTION:
+            return "CONSUMPTION";
+
+        default:
+            return "UNKNOWN";
+    }
+}
+
+static void transition_system_state(
+    SystemState new_state,
+    const char* reason
+)
+{
+    if (new_state == system_state)
+    {
+        return;
+    }
+
+    const uint64_t current_ms =
+        static_cast<uint64_t>(
+            esp_timer_get_time() / 1000ULL
+        );
+
+    const uint64_t previous_duration_ms =
+        state_entered_ms == 0
+            ? 0
+            : current_ms - state_entered_ms;
+
+    ESP_LOGI(
+        TAG,
+        "STATE: %s -> %s | reason=%s | previous_duration=%llu ms",
+        system_state_name(system_state),
+        system_state_name(new_state),
+        reason != nullptr ? reason : "none",
+        static_cast<unsigned long long>(previous_duration_ms)
+    );
+
+    system_state = new_state;
+    state_entered_ms = current_ms;
+}
+
+static SystemState determine_system_state()
+{
+    /*
+     * Priority order:
+     *
+     * 1. Calibration
+     * 2. OTA
+     * 3. Active reminder
+     * 4. Consumption result screen
+     * 5. Pomodoro
+     * 6. Idle/home clock
+     */
+    if (bottle_calibration_is_active())
+    {
+        return SystemState::CALIBRATION;
+    }
+
+    if (ota_manager_is_busy())
+    {
+        return SystemState::OTA;
+    }
+
+    if (reminder_engine_has_active_reminder())
+    {
+        return SystemState::REMINDER;
+    }
+
+    if (consumption_tracker_screen_active())
+    {
+        return SystemState::CONSUMPTION;
+    }
+
+    if (pomodoro_is_running())
+    {
+        return SystemState::POMODORO;
+    }
+
+    return SystemState::IDLE;
+}
+
+struct CpuUsageSnapshot
+{
+    bool valid = false;
+    double core0_percent = 0.0;
+    double core1_percent = 0.0;
+    double total_percent = 0.0;
+};
+
+static double clamp_cpu_percent(double value)
+{
+    if (value < 0.0)
+    {
+        return 0.0;
+    }
+
+    if (value > 100.0)
+    {
+        return 100.0;
+    }
+
+    return value;
+}
+
+static CpuUsageSnapshot read_cpu_usage_snapshot()
+{
+    CpuUsageSnapshot result;
+
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+    const UBaseType_t task_count =
+        uxTaskGetNumberOfTasks();
+
+    if (task_count > CPU_STATS_MAX_TASKS)
+    {
+        ESP_LOGW(
+            TAG,
+            "CPU stats skipped: tasks=%u exceeds buffer=%u",
+            static_cast<unsigned>(task_count),
+            static_cast<unsigned>(CPU_STATS_MAX_TASKS)
+        );
+
+        return result;
+    }
+
+    configRUN_TIME_COUNTER_TYPE total_runtime = 0;
+
+    const UBaseType_t captured =
+        uxTaskGetSystemState(
+            cpu_task_status,
+            CPU_STATS_MAX_TASKS,
+            &total_runtime
+        );
+
+    if (captured == 0)
+    {
+        ESP_LOGW(
+            TAG,
+            "CPU stats unavailable: uxTaskGetSystemState returned 0"
+        );
+
+        return result;
+    }
+
+    uint64_t idle0_runtime = 0;
+    uint64_t idle1_runtime = 0;
+    bool idle0_found = false;
+    bool idle1_found = false;
+
+    for (UBaseType_t index = 0; index < captured; ++index)
+    {
+        const TaskStatus_t& task =
+            cpu_task_status[index];
+
+        if (task.pcTaskName == nullptr)
+        {
+            continue;
+        }
+
+        if (std::strcmp(task.pcTaskName, "IDLE0") == 0)
+        {
+            idle0_runtime =
+                static_cast<uint64_t>(
+                    task.ulRunTimeCounter
+                );
+
+            idle0_found = true;
+        }
+        else if (std::strcmp(task.pcTaskName, "IDLE1") == 0)
+        {
+            idle1_runtime =
+                static_cast<uint64_t>(
+                    task.ulRunTimeCounter
+                );
+
+            idle1_found = true;
+        }
+    }
+
+    /*
+     * ESP32-S3 is dual-core in this project, therefore both idle tasks are
+     * expected. If either is missing, do not report a misleading percentage.
+     */
+    if (!idle0_found || !idle1_found)
+    {
+        ESP_LOGW(
+            TAG,
+            "CPU stats unavailable: IDLE0=%s IDLE1=%s",
+            idle0_found ? "found" : "missing",
+            idle1_found ? "found" : "missing"
+        );
+
+        return result;
+    }
+
+    const uint64_t current_total =
+        static_cast<uint64_t>(
+            total_runtime
+        );
+
+    if (!cpu_runtime_baseline_valid)
+    {
+        previous_total_runtime = current_total;
+        previous_idle0_runtime = idle0_runtime;
+        previous_idle1_runtime = idle1_runtime;
+        cpu_runtime_baseline_valid = true;
+
+        return result;
+    }
+
+    /*
+     * The configured run-time counter may wrap. If that happens, rebuild
+     * the baseline instead of producing a bogus utilization value.
+     */
+    if (
+        current_total <= previous_total_runtime ||
+        idle0_runtime < previous_idle0_runtime ||
+        idle1_runtime < previous_idle1_runtime
+    )
+    {
+        previous_total_runtime = current_total;
+        previous_idle0_runtime = idle0_runtime;
+        previous_idle1_runtime = idle1_runtime;
+
+        ESP_LOGW(
+            TAG,
+            "CPU run-time counter wrapped/reset; baseline restarted"
+        );
+
+        return result;
+    }
+
+    const uint64_t total_delta =
+        current_total - previous_total_runtime;
+
+    const uint64_t idle0_delta =
+        idle0_runtime - previous_idle0_runtime;
+
+    const uint64_t idle1_delta =
+        idle1_runtime - previous_idle1_runtime;
+
+    previous_total_runtime = current_total;
+    previous_idle0_runtime = idle0_runtime;
+    previous_idle1_runtime = idle1_runtime;
+
+    if (total_delta == 0)
+    {
+        return result;
+    }
+
+    /*
+     * Each idle task belongs to exactly one core. total_runtime is the
+     * run-time-stat timer elapsed during the window, so each core had
+     * total_delta units available in that same interval.
+     */
+    const double idle0_percent =
+        (static_cast<double>(idle0_delta) * 100.0) /
+        static_cast<double>(total_delta);
+
+    const double idle1_percent =
+        (static_cast<double>(idle1_delta) * 100.0) /
+        static_cast<double>(total_delta);
+
+    result.core0_percent =
+        clamp_cpu_percent(
+            100.0 - idle0_percent
+        );
+
+    result.core1_percent =
+        clamp_cpu_percent(
+            100.0 - idle1_percent
+        );
+
+    result.total_percent =
+        (result.core0_percent +
+         result.core1_percent) / 2.0;
+
+    result.valid = true;
+#else
+    /*
+     * Enable:
+     * Component config -> FreeRTOS -> Kernel ->
+     * Enable FreeRTOS to collect run time stats
+     */
+#endif
+
+    return result;
+}
+
+static void log_system_diagnostics()
+{
+    const uint64_t current_us =
+        static_cast<uint64_t>(
+            esp_timer_get_time()
+        );
+
+    if (diagnostic_window_started_us == 0)
+    {
+        diagnostic_window_started_us = current_us;
+        diagnostic_busy_us = 0;
+        diagnostic_loop_count = 0;
+        return;
+    }
+
+    const uint64_t elapsed_us =
+        current_us - diagnostic_window_started_us;
+
+    if (
+        elapsed_us <
+        static_cast<uint64_t>(
+            SYSTEM_DIAGNOSTIC_INTERVAL_MS
+        ) * 1000ULL
+    )
+    {
+        return;
+    }
+
+    /*
+     * This is the main-loop busy percentage, not total chip utilization.
+     * It measures how much wall-clock time app_main spent doing work
+     * versus sleeping/yielding during the diagnostic window.
+     */
+    double main_busy_percent = 0.0;
+
+    if (elapsed_us > 0)
+    {
+        main_busy_percent =
+            (static_cast<double>(diagnostic_busy_us) * 100.0) /
+            static_cast<double>(elapsed_us);
+    }
+
+    const UBaseType_t stack_high_water =
+        uxTaskGetStackHighWaterMark(nullptr);
+
+    const CpuUsageSnapshot cpu =
+        read_cpu_usage_snapshot();
+
+    if (cpu.valid)
+    {
+        ESP_LOGI(
+            TAG,
+            "SYSTEM: state=%s CPU0=%.1f%% CPU1=%.1f%% TOTAL=%.1f%% "
+            "main_busy=%.1f%% loops=%u stack_free_min=%u heap_free=%u",
+            system_state_name(system_state),
+            cpu.core0_percent,
+            cpu.core1_percent,
+            cpu.total_percent,
+            main_busy_percent,
+            static_cast<unsigned>(diagnostic_loop_count),
+            static_cast<unsigned>(stack_high_water),
+            static_cast<unsigned>(esp_get_free_heap_size())
+        );
+    }
+    else
+    {
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+        ESP_LOGI(
+            TAG,
+            "SYSTEM: state=%s CPU=BASELINING main_busy=%.1f%% loops=%u "
+            "stack_free_min=%u heap_free=%u",
+            system_state_name(system_state),
+            main_busy_percent,
+            static_cast<unsigned>(diagnostic_loop_count),
+            static_cast<unsigned>(stack_high_water),
+            static_cast<unsigned>(esp_get_free_heap_size())
+        );
+#else
+        ESP_LOGW(
+            TAG,
+            "SYSTEM: state=%s CPU=N/A main_busy=%.1f%% loops=%u "
+            "stack_free_min=%u heap_free=%u | "
+            "Enable CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS",
+            system_state_name(system_state),
+            main_busy_percent,
+            static_cast<unsigned>(diagnostic_loop_count),
+            static_cast<unsigned>(stack_high_water),
+            static_cast<unsigned>(esp_get_free_heap_size())
+        );
+#endif
+    }
+
+    diagnostic_window_started_us = current_us;
+    diagnostic_busy_us = 0;
+    diagnostic_loop_count = 0;
+}
+
+/* =========================================================
  * Shared IR sensor
  *
  * GPIO7 is used for:
@@ -59,6 +510,28 @@ static bool dock_filter_initialized = false;
 static bool dock_candidate_state = false;
 static bool dock_reported_state = false;
 static uint64_t dock_candidate_since_ms = 0;
+
+/*
+ * IR-driven scheduling.
+ *
+ * Raw IR reads remain cheap and frequent. Heavier consumption/Pomodoro work
+ * is only serviced when the sensor changes or while the dock stability filter
+ * is still settling.
+ */
+static bool ir_activity_pending = false;
+static bool dock_stability_pending = false;
+static bool last_raw_ir_docked = false;
+static uint64_t last_ir_poll_ms = 0;
+
+static constexpr uint32_t IR_POLL_INTERVAL_MS = 20;
+static constexpr uint32_t IDLE_DISPLAY_INTERVAL_MS = 250;
+static constexpr uint32_t ACTION_LOG_DISPLAY_INTERVAL_MS = 50;
+static constexpr uint32_t REMINDER_ENGINE_INTERVAL_MS = 100;
+static constexpr uint32_t STATISTICS_INTERVAL_MS = 1000;
+
+static uint64_t last_idle_display_ms = 0;
+static uint64_t last_reminder_update_ms = 0;
+static uint64_t last_statistics_update_ms = 0;
 
 
 /* =========================================================
@@ -95,7 +568,10 @@ static void initialize_shared_ir_dock_state()
     dock_filter_initialized = true;
     dock_candidate_state = current_docked;
     dock_reported_state = current_docked;
+    last_raw_ir_docked = current_docked;
     dock_candidate_since_ms = application_millis();
+    dock_stability_pending = false;
+    ir_activity_pending = false;
 
     audio_manager_set_dock_state(current_docked);
     bottle_calibration_set_docked(current_docked);
@@ -108,27 +584,46 @@ static void initialize_shared_ir_dock_state()
     );
 }
 
-static void update_shared_ir_dock_state()
+static bool update_shared_ir_dock_state()
 {
     const uint64_t current_ms = application_millis();
+
+    if (
+        current_ms - last_ir_poll_ms <
+        IR_POLL_INTERVAL_MS
+    )
+    {
+        return false;
+    }
+
+    last_ir_poll_ms = current_ms;
+
     const bool sampled_docked = read_shared_ir_docked();
 
     if (!dock_filter_initialized)
     {
         initialize_shared_ir_dock_state();
-        return;
+        return false;
+    }
+
+    if (sampled_docked != last_raw_ir_docked)
+    {
+        last_raw_ir_docked = sampled_docked;
+        ir_activity_pending = true;
     }
 
     if (sampled_docked != dock_candidate_state)
     {
         dock_candidate_state = sampled_docked;
         dock_candidate_since_ms = current_ms;
-        return;
+        dock_stability_pending = true;
+        return false;
     }
 
     if (dock_candidate_state == dock_reported_state)
     {
-        return;
+        dock_stability_pending = false;
+        return false;
     }
 
     if (
@@ -136,10 +631,13 @@ static void update_shared_ir_dock_state()
         DOCK_STABLE_TIME_MS
     )
     {
-        return;
+        dock_stability_pending = true;
+        return false;
     }
 
     dock_reported_state = dock_candidate_state;
+    dock_stability_pending = false;
+    ir_activity_pending = true;
 
     action_log_show_bottle(
         dock_reported_state
@@ -156,6 +654,8 @@ static void update_shared_ir_dock_state()
         "Stable shared IR dock state: %s",
         dock_reported_state ? "DOCKED" : "UNDOCKED"
     );
+
+    return true;
 }
 
 /* =========================================================
@@ -909,6 +1409,8 @@ static void acknowledge_current_reminder()
  */
 static void on_acknowledgement_input()
 {
+    ir_activity_pending = true;
+
     /*
      * Active reminder:
      * one tap acknowledges immediately.
@@ -1508,135 +2010,335 @@ extern "C" void app_main()
      * Main loop
      * ----------------------------------------------------- */
 
+    state_entered_ms = application_millis();
+    diagnostic_window_started_us =
+        static_cast<uint64_t>(esp_timer_get_time());
+
+    ESP_LOGI(
+        TAG,
+        "STATE: initial=%s",
+        system_state_name(system_state)
+    );
+
     while (true)
     {
+        const uint64_t loop_started_us =
+            static_cast<uint64_t>(
+                esp_timer_get_time()
+            );
+
         const time_t now =
             time(nullptr);
 
+        /*
+         * Lightweight common services.
+         *
+         * These remain active in every state because they maintain
+         * user input, Action Log lifetime, audio/DFPlayer servicing,
+         * dock detection, and BLE calibration requests.
+         */
         action_log_update();
 
-        /* Archives the completed day to SPIFFS immediately after date rollover. */
-        user_statistics_update_day();
-
-        /*
-         * Read the acknowledgement/Pomodoro input.
-         */
         acknowledgement_input_update();
-        update_pomodoro_double_tap();
+
+        const bool dock_state_changed =
+            update_shared_ir_dock_state();
+
+        if (
+            pomodoro_first_tap_pending ||
+            ir_activity_pending
+        )
+        {
+            update_pomodoro_double_tap();
+        }
+
+        audio_manager_update(now);
 
         /*
-         * The same IR sensor also acts as the healing dock sensor.
-         * Short acknowledgement/Pomodoro gestures are ignored by
-         * the 1200 ms dock stability filter.
-         */
-        update_shared_ir_dock_state();
-
-        /*
-         * BLE callbacks only queue calibration commands. Execute them here
-         * so all LovyanGFX work remains on the main application task.
+         * BLE callbacks queue calibration commands. Execute those requests
+         * only from app_main so display/HX711 ownership remains deterministic.
          */
         if (bluetooth_take_bottle_calibration_cancel_request())
         {
-            ESP_LOGI(TAG, "Processing BLE bottle calibration cancel request");
+            ESP_LOGI(
+                TAG,
+                "Processing BLE bottle calibration cancel request"
+            );
+
             bottle_calibration_cancel();
         }
 
         if (bluetooth_take_bottle_calibration_start_request())
         {
-            ESP_LOGI(TAG, "Processing BLE bottle calibration start request");
+            ESP_LOGI(
+                TAG,
+                "Processing BLE bottle calibration start request"
+            );
 
             if (!bottle_calibration_start())
             {
-                ESP_LOGE(TAG, "Bottle calibration could not start");
+                ESP_LOGE(
+                    TAG,
+                    "Bottle calibration could not start"
+                );
             }
         }
 
         /*
-         * Calibration consumes HX711 readings and owns the complete
-         * display while active.
+         * Resolve the current state before state-specific work.
          */
-        bottle_calibration_update();
+        SystemState requested_state =
+            determine_system_state();
 
-        const bool calibration_active = bottle_calibration_is_active();
-        consumption_tracker_set_enabled(!calibration_active);
-        consumption_tracker_set_docked(dock_reported_state);
-        consumption_tracker_update();
-
-        /*
-         * Keep audio servicing active, but the normal reminder,
-         * Pomodoro and home-screen rendering below are suspended
-         * during calibration.
-         */
-        audio_manager_update(now);
-
-        if (calibration_active)
+        if (requested_state != system_state)
         {
-            vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
+            transition_system_state(
+                requested_state,
+                "priority evaluation"
+            );
         }
 
-        const bool pomodoro_focus_active =
-            pomodoro_is_running() &&
-            pomodoro_get_state() ==
-                PomodoroState::FOCUS;
-
-        /*
-         * During Pomodoro focus:
-         *
-         * - medication reminders may become active immediately
-         * - all other reminders are still detected and queued
-         * - queued non-medication reminders wait until break
-         *
-         * During break or normal clock mode:
-         *
-         * - all reminder types may become active normally
-         */
-        reminder_engine_set_medication_only_activation(
-            pomodoro_focus_active
-        );
-
-        /*
-         * Always update reminders before Pomodoro transitions.
-         *
-         * This ordering is important when a break reaches 00:00:
-         * a due or queued reminder becomes active first, allowing
-         * pomodoro_update() to hold the break until it finishes.
-         */
-        reminder_engine_update(
-            now
-        );
-
-        /*
-         * Update Pomodoro after reminder processing.
-         */
-        pomodoro_update();
-
-        /*
-         * Display priority:
-         *
-         * 1. Active reminder
-         * 2. Consumption result screen
-         * 3. Pomodoro focus/break screen
-         * 4. Home clock
-         */
-        if (!reminder_engine_has_active_reminder())
+        switch (system_state)
         {
-            if (consumption_tracker_screen_active())
+            case SystemState::CALIBRATION:
             {
-                consumption_tracker_render_screen();
+                /*
+                 * Calibration owns HX711 processing and the full display.
+                 * Normal reminders, Pomodoro rendering, consumption updates,
+                 * and statistics rollover work are suspended.
+                 */
+                consumption_tracker_set_enabled(false);
+
+                bottle_calibration_update();
+
+                if (!bottle_calibration_is_active())
+                {
+                    consumption_tracker_set_enabled(true);
+
+                    transition_system_state(
+                        SystemState::IDLE,
+                        "calibration finished"
+                    );
+                }
+
+                break;
             }
-            else if (pomodoro_is_running())
+
+            case SystemState::OTA:
             {
-                pomodoro_render_if_needed();
+                /*
+                 * OTA runs in its own task. Keep this main task focused on
+                 * the Action Log / progress arc and essential common services.
+                 *
+                 * Do not run reminder scheduling, Pomodoro, consumption
+                 * processing, or statistics maintenance while OTA is active.
+                 */
+                if (!reminder_engine_has_active_reminder())
+                {
+                    display_show_home_clock(now);
+                }
+
+                if (!ota_manager_is_busy())
+                {
+                    transition_system_state(
+                        SystemState::IDLE,
+                        "OTA finished"
+                    );
+                }
+
+                break;
             }
-            else
+
+            case SystemState::REMINDER:
             {
-                display_show_home_clock(now);
+                /*
+                 * The reminder callback already owns the reminder screen.
+                 * Continue updating the reminder engine for timeout,
+                 * acknowledgement, snooze, and completion behavior.
+                 */
+                reminder_engine_update(now);
+
+                if (!reminder_engine_has_active_reminder())
+                {
+                    transition_system_state(
+                        determine_system_state(),
+                        "reminder finished"
+                    );
+                }
+
+                break;
+            }
+
+            case SystemState::POMODORO:
+            {
+                const bool pomodoro_focus_active =
+                    pomodoro_is_running() &&
+                    pomodoro_get_state() ==
+                        PomodoroState::FOCUS;
+
+                reminder_engine_set_medication_only_activation(
+                    pomodoro_focus_active
+                );
+
+                /*
+                 * Keep reminder detection active during Pomodoro so the
+                 * existing focus/break reminder rules remain unchanged.
+                 */
+                reminder_engine_update(now);
+
+                if (reminder_engine_has_active_reminder())
+                {
+                    transition_system_state(
+                        SystemState::REMINDER,
+                        "reminder activated during Pomodoro"
+                    );
+
+                    break;
+                }
+
+                pomodoro_update();
+
+                if (pomodoro_is_running())
+                {
+                    pomodoro_render_if_needed();
+                }
+                else
+                {
+                    transition_system_state(
+                        SystemState::IDLE,
+                        "Pomodoro stopped"
+                    );
+                }
+
+                break;
+            }
+
+            case SystemState::CONSUMPTION:
+            {
+                /*
+                 * Keep the consumption result screen as the display owner.
+                 * Continue tracker processing so its timeout/state can finish.
+                 */
+                consumption_tracker_set_enabled(true);
+                consumption_tracker_set_docked(dock_reported_state);
+                consumption_tracker_update();
+
+                if (consumption_tracker_screen_active())
+                {
+                    consumption_tracker_render_screen();
+                }
+                else
+                {
+                    transition_system_state(
+                        determine_system_state(),
+                        "consumption screen finished"
+                    );
+                }
+
+                break;
+            }
+
+            case SystemState::IDLE:
+            default:
+            {
+                const uint64_t current_ms =
+                    application_millis();
+
+                if (
+                    current_ms - last_statistics_update_ms >=
+                    STATISTICS_INTERVAL_MS
+                )
+                {
+                    last_statistics_update_ms = current_ms;
+                    user_statistics_update_day();
+                }
+
+                if (
+                    current_ms - last_reminder_update_ms >=
+                    REMINDER_ENGINE_INTERVAL_MS
+                )
+                {
+                    last_reminder_update_ms = current_ms;
+
+                    reminder_engine_set_medication_only_activation(false);
+                    reminder_engine_update(now);
+                }
+
+                if (reminder_engine_has_active_reminder())
+                {
+                    transition_system_state(
+                        SystemState::REMINDER,
+                        "reminder activated"
+                    );
+
+                    break;
+                }
+
+                if (
+                    ir_activity_pending ||
+                    dock_state_changed ||
+                    dock_stability_pending
+                )
+                {
+                    consumption_tracker_set_enabled(true);
+                    consumption_tracker_set_docked(dock_reported_state);
+                    consumption_tracker_update();
+                }
+
+                requested_state =
+                    determine_system_state();
+
+                if (requested_state != SystemState::IDLE)
+                {
+                    ir_activity_pending = false;
+
+                    transition_system_state(
+                        requested_state,
+                        "subsystem activated"
+                    );
+
+                    break;
+                }
+
+                const uint32_t display_interval_ms =
+                    action_log_is_visible()
+                        ? ACTION_LOG_DISPLAY_INTERVAL_MS
+                        : IDLE_DISPLAY_INTERVAL_MS;
+
+                if (
+                    current_ms - last_idle_display_ms >=
+                    display_interval_ms
+                )
+                {
+                    last_idle_display_ms = current_ms;
+                    display_show_home_clock(now);
+                }
+
+                ir_activity_pending = false;
+
+                break;
             }
         }
+
+        const uint64_t loop_finished_us =
+            static_cast<uint64_t>(
+                esp_timer_get_time()
+            );
+
+        if (loop_finished_us >= loop_started_us)
+        {
+            diagnostic_busy_us +=
+                loop_finished_us - loop_started_us;
+        }
+
+        ++diagnostic_loop_count;
+
+        log_system_diagnostics();
 
         vTaskDelay(
-            pdMS_TO_TICKS(20)
+            pdMS_TO_TICKS(
+                MAIN_LOOP_PERIOD_MS
+            )
         );
     }
 }
