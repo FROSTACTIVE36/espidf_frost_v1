@@ -36,6 +36,7 @@
 #include "ota_manager.hpp"
 #include "action_log.hpp"
 #include "audio_manager.hpp"
+#include "consumption_tracker.hpp"
 #include <cstring>
 
 
@@ -1002,6 +1003,87 @@ static bool process_ble_command(
             "Volume command applied: %u%s",
             static_cast<unsigned>(volume),
             volume == 0 ? " (muted)" : ""
+        );
+
+        return true;
+    }
+
+    /*
+     * Daily hydration goal command:
+     *
+     * SET GOAL 2500
+     *
+     * Valid range: 100..10000 ml.
+     */
+    static constexpr char goal_set_prefix[] = "SET GOAL ";
+    static constexpr size_t goal_set_prefix_length =
+        sizeof(goal_set_prefix) - 1;
+
+    if (
+        strncmp(
+            command,
+            goal_set_prefix,
+            goal_set_prefix_length
+        ) == 0
+    )
+    {
+        const char* value_text =
+            command + goal_set_prefix_length;
+
+        if (value_text[0] == '\0')
+        {
+            set_ble_status("ERROR:GOAL_FORMAT");
+            return false;
+        }
+
+        char* end_pointer = nullptr;
+
+        const long requested_goal =
+            std::strtol(
+                value_text,
+                &end_pointer,
+                10
+            );
+
+        if (
+            end_pointer == value_text ||
+            *end_pointer != '\0'
+        )
+        {
+            set_ble_status("ERROR:GOAL_FORMAT");
+            return false;
+        }
+
+        if (
+            requested_goal < 100 ||
+            requested_goal > 10000
+        )
+        {
+            set_ble_status("ERROR:GOAL_RANGE");
+            return false;
+        }
+
+        consumption_tracker_set_daily_goal_ml(
+            static_cast<uint32_t>(
+                requested_goal
+            )
+        );
+
+        char response[32] = {};
+
+        std::snprintf(
+            response,
+            sizeof(response),
+            "OK:GOAL:%ld",
+            requested_goal
+        );
+
+        set_ble_status(response);
+
+        ESP_LOGI(
+            TAG,
+            "Daily hydration goal set to %ld ml",
+            requested_goal
         );
 
         return true;
