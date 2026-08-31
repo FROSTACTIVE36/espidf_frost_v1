@@ -8,6 +8,8 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "LovyanGFX.hpp"
 #include "qrcode.h"
 
@@ -152,6 +154,157 @@ static bool display_ready = false;
 static bool sprite_ready = false;
 
 /* =========================================================
+ * Full-screen cross-fade support
+ * ========================================================= */
+
+static constexpr size_t FRAME_PIXEL_COUNT =
+    static_cast<size_t>(DISPLAY_WIDTH) *
+    static_cast<size_t>(DISPLAY_HEIGHT);
+
+static constexpr size_t FRAME_BYTES =
+    FRAME_PIXEL_COUNT * sizeof(uint16_t);
+
+static constexpr uint8_t CROSSFADE_STEPS = 8;
+static constexpr uint32_t CROSSFADE_STEP_DELAY_MS = 12;
+
+static uint16_t* last_frame_buffer = nullptr;
+static uint16_t* blend_frame_buffer = nullptr;
+static uint16_t* screen_frame_buffer = nullptr;
+
+static bool last_frame_valid = false;
+static bool normal_reminder_visible = false;
+static bool boot_transition_pending = false;
+
+static inline uint16_t swap_rgb565_bytes(uint16_t pixel)
+{
+    return static_cast<uint16_t>(
+        (pixel >> 8) |
+        (pixel << 8)
+    );
+}
+
+/*
+ * The LovyanGFX sprite is filled from RGB565 image arrays while
+ * setSwapBytes(true) is enabled.  Therefore the raw 16-bit words in the
+ * sprite buffer are byte-swapped relative to logical RGB565.
+ *
+ * Blending those raw words directly mixes the wrong bit fields and causes
+ * the pink/green/cyan corruption visible during the transition.  Convert
+ * both pixels to logical RGB565 first, blend the real R/G/B channels, then
+ * convert the result back to the sprite-buffer byte order.
+ */
+static uint16_t blend_rgb565(
+    uint16_t from_stored,
+    uint16_t to_stored,
+    uint8_t alpha
+)
+{
+    const uint16_t from = swap_rgb565_bytes(from_stored);
+    const uint16_t to = swap_rgb565_bytes(to_stored);
+
+    const uint32_t inverse = 255U - alpha;
+
+    const uint32_t from_r = (from >> 11) & 0x1FU;
+    const uint32_t from_g = (from >> 5) & 0x3FU;
+    const uint32_t from_b = from & 0x1FU;
+
+    const uint32_t to_r = (to >> 11) & 0x1FU;
+    const uint32_t to_g = (to >> 5) & 0x3FU;
+    const uint32_t to_b = to & 0x1FU;
+
+    const uint32_t r =
+        (from_r * inverse + to_r * alpha + 127U) / 255U;
+    const uint32_t g =
+        (from_g * inverse + to_g * alpha + 127U) / 255U;
+    const uint32_t b =
+        (from_b * inverse + to_b * alpha + 127U) / 255U;
+
+    const uint16_t logical_rgb565 = static_cast<uint16_t>(
+        (r << 11) |
+        (g << 5) |
+        b
+    );
+
+    return swap_rgb565_bytes(logical_rgb565);
+}
+
+static void remember_current_frame()
+{
+    if (last_frame_buffer == nullptr || screen_frame_buffer == nullptr)
+    {
+        return;
+    }
+
+    std::memcpy(last_frame_buffer, screen_frame_buffer, FRAME_BYTES);
+    last_frame_valid = true;
+}
+
+static void present_screen_frame(bool animate)
+{
+    if (!display_ready || !sprite_ready || screen_frame_buffer == nullptr)
+    {
+        return;
+    }
+
+    const bool can_crossfade =
+        animate &&
+        last_frame_valid &&
+        last_frame_buffer != nullptr &&
+        blend_frame_buffer != nullptr;
+
+    if (can_crossfade)
+    {
+        /*
+         * blend_frame_buffer is kept in the same raw byte order as the
+         * sprite framebuffer, so it can be pushed without another swap.
+         */
+        display.setSwapBytes(false);
+        display.startWrite();
+
+        for (uint8_t step = 1; step <= CROSSFADE_STEPS; ++step)
+        {
+            const uint8_t alpha = static_cast<uint8_t>(
+                (static_cast<uint32_t>(step) * 255U) / CROSSFADE_STEPS
+            );
+
+            for (size_t pixel = 0; pixel < FRAME_PIXEL_COUNT; ++pixel)
+            {
+                blend_frame_buffer[pixel] = blend_rgb565(
+                    last_frame_buffer[pixel],
+                    screen_frame_buffer[pixel],
+                    alpha
+                );
+            }
+
+            display.pushImage(
+                0,
+                0,
+                DISPLAY_WIDTH,
+                DISPLAY_HEIGHT,
+                blend_frame_buffer
+            );
+
+            if (step < CROSSFADE_STEPS)
+            {
+                vTaskDelay(pdMS_TO_TICKS(CROSSFADE_STEP_DELAY_MS));
+            }
+        }
+
+        display.endWrite();
+        display.setSwapBytes(true);
+    }
+    else
+    {
+        display.startWrite();
+        screen.pushSprite(0, 0);
+        display.endWrite();
+    }
+
+    remember_current_frame();
+}
+
+
+/* =========================================================
  * Initialize display
  * ========================================================= */
 
@@ -252,6 +405,43 @@ bool display_init()
     }
 
     sprite_ready = true;
+    screen_frame_buffer = static_cast<uint16_t*>(sprite_buffer);
+
+    last_frame_buffer = static_cast<uint16_t*>(
+        heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+    );
+
+    blend_frame_buffer = static_cast<uint16_t*>(
+        heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+    );
+
+    if (last_frame_buffer == nullptr || blend_frame_buffer == nullptr)
+    {
+        ESP_LOGW(
+            TAG,
+            "Cross-fade buffers unavailable; display will use direct transitions"
+        );
+
+        if (last_frame_buffer != nullptr)
+        {
+            heap_caps_free(last_frame_buffer);
+            last_frame_buffer = nullptr;
+        }
+
+        if (blend_frame_buffer != nullptr)
+        {
+            heap_caps_free(blend_frame_buffer);
+            blend_frame_buffer = nullptr;
+        }
+    }
+    else
+    {
+        ESP_LOGI(
+            TAG,
+            "Cross-fade buffers ready: %u bytes x 2 in PSRAM",
+            static_cast<unsigned>(FRAME_BYTES)
+        );
+    }
 
     ESP_LOGI(
         TAG,
@@ -294,8 +484,29 @@ void display_show_frost_logo()
 
     ESP_LOGI(TAG, "Showing Frost boot logo");
 
-    display.setSwapBytes(true);
+    /*
+     * Keep the boot logo inside the same full-screen sprite pipeline used
+     * by the rest of the UI.  This makes the logo the valid "old frame"
+     * for the first Home cross-fade instead of bypassing the framebuffer.
+     */
+    if (sprite_ready)
+    {
+        screen.setSwapBytes(true);
+        screen.pushImage(
+            0,
+            0,
+            FROST_LOGO_WIDTH,
+            FROST_LOGO_HEIGHT,
+            frost_logo_data
+        );
 
+        present_screen_frame(false);
+        boot_transition_pending = true;
+        return;
+    }
+
+    /* Fallback only if sprite allocation failed. */
+    display.setSwapBytes(true);
     display.pushImage(
         0,
         0,
@@ -367,47 +578,29 @@ bool display_show_onboarding_qr()
 
 void display_show_hydration_reminder()
 {
-    display.startWrite();
-
-    display.pushImage(
-        0,
-        0,
-        240,
-        240,
-        drinkwater1_data
-    );
-
-    display.endWrite();
+    if (!display_ready || !sprite_ready) return;
+    screen.setSwapBytes(true);
+    screen.pushImage(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, drinkwater1_data);
+    present_screen_frame(true);
+    normal_reminder_visible = true;
 }
 
 void display_show_stretch_reminder()
 {
-    display.startWrite();
-
-    display.pushImage(
-        0,
-        0,
-        240,
-        240,
-        image_time_to_stretch_data
-    );
-
-    display.endWrite();
+    if (!display_ready || !sprite_ready) return;
+    screen.setSwapBytes(true);
+    screen.pushImage(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, image_time_to_stretch_data);
+    present_screen_frame(true);
+    normal_reminder_visible = true;
 }
 
 void display_show_eye_reminder()
 {
-    display.startWrite();
-
-    display.pushImage(
-        0,
-        0,
-        240,
-        240,
-        rule_data
-    );
-
-    display.endWrite();
+    if (!display_ready || !sprite_ready) return;
+    screen.setSwapBytes(true);
+    screen.pushImage(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, rule_data);
+    present_screen_frame(true);
+    normal_reminder_visible = true;
 }
 
 void display_show_walk_reminder()
@@ -417,17 +610,11 @@ void display_show_walk_reminder()
         return;
     }
 
-    display.startWrite();
-
-    display.pushImage(
-        0,
-        0,
-        DISPLAY_WIDTH,
-        DISPLAY_HEIGHT,
-        short_walk_data
-    );
-
-    display.endWrite();
+    if (!sprite_ready) return;
+    screen.setSwapBytes(true);
+    screen.pushImage(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, short_walk_data);
+    present_screen_frame(true);
+    normal_reminder_visible = true;
 }
 
 void display_show_bottle_clean_reminder()
@@ -437,17 +624,11 @@ void display_show_bottle_clean_reminder()
         return;
     }
 
-    display.startWrite();
-
-    display.pushImage(
-        0,
-        0,
-        240,
-        240,
-        bottle_clean_data
-    );
-
-    display.endWrite();
+    if (!sprite_ready) return;
+    screen.setSwapBytes(true);
+    screen.pushImage(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, bottle_clean_data);
+    present_screen_frame(true);
+    normal_reminder_visible = true;
 }
 
 
@@ -819,14 +1000,8 @@ void display_show_medication_reminder(
     /*
      * Send completed sprite to the display.
      */
-    display.startWrite();
-
-    screen.pushSprite(
-        0,
-        0
-    );
-
-    display.endWrite();
+    present_screen_frame(true);
+    normal_reminder_visible = true;
 }
 
 /* =========================================================
@@ -893,14 +1068,8 @@ void display_show_custom_reminder(
     /*
      * Push completed sprite.
      */
-    display.startWrite();
-
-    screen.pushSprite(
-        0,
-        0
-    );
-
-    display.endWrite();
+    present_screen_frame(true);
+    normal_reminder_visible = true;
 }
 
 /* =========================================================
@@ -923,17 +1092,11 @@ void display_show_meditation_reminder()
      * Meditation is already a complete image,
      * so it can be sent directly to the display.
      */
-    display.startWrite();
-
-    display.pushImage(
-        0,
-        0,
-        DISPLAY_WIDTH,
-        DISPLAY_HEIGHT,
-        meditation_data
-    );
-
-    display.endWrite();
+    if (!sprite_ready) return;
+    screen.setSwapBytes(true);
+    screen.pushImage(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, meditation_data);
+    present_screen_frame(true);
+    normal_reminder_visible = true;
 }
 
 /* =========================================================
@@ -1077,14 +1240,8 @@ static void draw_pomodoro_counter(
 
     screen.unloadFont();
 
-    display.startWrite();
-
-    screen.pushSprite(
-        0,
-        0
-    );
-
-    display.endWrite();
+    present_screen_frame(false);
+    normal_reminder_visible = false;
 }
 
 void display_show_pomodoro_focus(
@@ -1578,10 +1735,19 @@ void display_show_home_clock(time_t current_time)
     draw_ota_full_screen_progress_arc();
     draw_action_log_overlay();
 
-    // Push completed frame
-    display.startWrite();
-    screen.pushSprite(0, 0);
-    display.endWrite();
+    /*
+     * Cross-fade Home when returning from a reminder, and also on the first
+     * Home frame after the boot logo.  Periodic clock redraws remain direct
+     * so the blinking separator and Action Log do not continuously animate.
+     */
+    const bool should_crossfade_to_home =
+        normal_reminder_visible ||
+        boot_transition_pending;
+
+    present_screen_frame(should_crossfade_to_home);
+
+    normal_reminder_visible = false;
+    boot_transition_pending = false;
 }
 
 /* =========================================================
@@ -2023,7 +2189,6 @@ void display_show_consumption_screen(
 
     screen.unloadFont();
 
-    display.startWrite();
-    screen.pushSprite(0, 0);
-    display.endWrite();
+    present_screen_frame(false);
+    normal_reminder_visible = false;
 }
