@@ -20,6 +20,8 @@ idf_component_register(
        "action_log.cpp"
         "wifi_manager.cpp"
         "ota_manager.cpp"
+        "demo_mode.cpp"
+        "onboarding.cpp"
 
     INCLUDE_DIRS
         "."
@@ -41,6 +43,7 @@ idf_component_register(
         app_update
         mbedtls
         espressif__cjson
+        qrcode
         
 )
 

@@ -107,6 +107,8 @@ static StatisticsExportMode statistics_export_mode = StatisticsExportMode::TODAY
  */
 static std::atomic_bool bottle_calibration_start_requested{false};
 static std::atomic_bool bottle_calibration_cancel_requested{false};
+static std::atomic_bool bind_ok_requested{false};
+static std::atomic_bool bind_reset_requested{false};
 
 static bluetooth_json_handler_t
     json_configuration_handler = nullptr;
@@ -703,6 +705,22 @@ static bool process_ble_command(
         );
 
         return false;
+    }
+
+    if (strcmp(command, "BIND:OK") == 0)
+    {
+        bind_ok_requested.store(true);
+        set_ble_status("OK:BIND");
+        ESP_LOGI(TAG, "Binding confirmation queued");
+        return true;
+    }
+
+    if (strcmp(command, "BIND:RESET") == 0)
+    {
+        bind_reset_requested.store(true);
+        set_ble_status("OK:BIND_RESET");
+        ESP_LOGI(TAG, "Binding reset queued");
+        return true;
     }
 
     /*
@@ -2037,4 +2055,13 @@ bool bluetooth_take_bottle_calibration_cancel_request(void)
 const char *bluetooth_get_device_name(void)
 {
     return current_ble_device_name;
+}
+bool bluetooth_take_bind_ok_request(void)
+{
+    return bind_ok_requested.exchange(false);
+}
+
+bool bluetooth_take_bind_reset_request(void)
+{
+    return bind_reset_requested.exchange(false);
 }

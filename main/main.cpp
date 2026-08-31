@@ -33,12 +33,22 @@
 #include "action_log.hpp"
 #include "wifi_manager.hpp"
 #include "ota_manager.hpp"
+#include "demo_mode.hpp"
+#include "onboarding.hpp"
 
 /* =========================================================
  * Logging
  * ========================================================= */
 
 static const char* TAG = "FROST_MAIN";
+
+/*
+ * Demo mode is intentionally isolated behind one switch.
+ * Set to 0 for production builds; the normal firmware flow is then unchanged.
+ */
+#ifndef FROST_ENABLE_DEMO_MODE
+#define FROST_ENABLE_DEMO_MODE 1
+#endif
 
 /* =========================================================
  * Top-level system state machine
@@ -47,11 +57,13 @@ static const char* TAG = "FROST_MAIN";
 enum class SystemState : uint8_t
 {
     IDLE = 0,
+    ONBOARDING,
     REMINDER,
     POMODORO,
     CALIBRATION,
     OTA,
-    CONSUMPTION
+    CONSUMPTION,
+    DEMO
 };
 
 static SystemState system_state = SystemState::IDLE;
@@ -93,6 +105,9 @@ static const char* system_state_name(SystemState state)
         case SystemState::IDLE:
             return "IDLE";
 
+        case SystemState::ONBOARDING:
+            return "ONBOARDING";
+
         case SystemState::REMINDER:
             return "REMINDER";
 
@@ -107,6 +122,9 @@ static const char* system_state_name(SystemState state)
 
         case SystemState::CONSUMPTION:
             return "CONSUMPTION";
+
+        case SystemState::DEMO:
+            return "DEMO";
 
         default:
             return "UNKNOWN";
@@ -148,6 +166,11 @@ static void transition_system_state(
 
 static SystemState determine_system_state()
 {
+    if (onboarding_is_required())
+    {
+        return SystemState::ONBOARDING;
+    }
+
     /*
      * Priority order:
      *
@@ -156,7 +179,11 @@ static SystemState determine_system_state()
      * 3. Active reminder
      * 4. Consumption result screen
      * 5. Pomodoro
-     * 6. Idle/home clock
+     * 6. Demo mode
+     * 7. Idle/home clock
+     *
+     * Demo intentionally has the lowest active-mode priority so a real
+     * reminder, OTA, calibration, consumption result, or Pomodoro can win.
      */
     if (bottle_calibration_is_active())
     {
@@ -182,6 +209,13 @@ static SystemState determine_system_state()
     {
         return SystemState::POMODORO;
     }
+
+#if FROST_ENABLE_DEMO_MODE
+    if (demo_mode_is_active())
+    {
+        return SystemState::DEMO;
+    }
+#endif
 
     return SystemState::IDLE;
 }
@@ -541,14 +575,25 @@ static bool previous_action_log_visible = false;
 
 
 /* =========================================================
- * Pomodoro double-tap detection
+ * Shared IR tap gesture detection
+ *
+ * 1 tap  : no action when idle
+ * 2 taps : Pomodoro toggle
+ * 3 taps : Demo mode start/stop (development build only)
+ *
+ * IMPORTANT:
+ * The Pomodoro action is delayed until the triple-tap window closes.
+ * Otherwise the second tap would start Pomodoro before a third tap could
+ * be recognized as the demo gesture.
  * ========================================================= */
 
-static bool pomodoro_first_tap_pending = false;
-static uint64_t pomodoro_first_tap_ms = 0;
+static uint8_t ir_tap_count = 0;
+static uint64_t ir_first_tap_ms = 0;
+static uint64_t ir_last_tap_ms = 0;
 
-static constexpr uint64_t POMODORO_DOUBLE_TAP_MIN_MS = 120;
-static constexpr uint64_t POMODORO_DOUBLE_TAP_MAX_MS = 800;
+static constexpr uint64_t IR_MULTI_TAP_MIN_MS = 120;
+static constexpr uint64_t IR_MULTI_TAP_MAX_GAP_MS = 800;
+static constexpr uint64_t IR_MULTI_TAP_TOTAL_WINDOW_MS = 1800;
 
 static uint64_t application_millis()
 {
@@ -1413,106 +1458,169 @@ static void acknowledge_current_reminder()
  * No active reminder:
  *     start or stop Pomodoro
  */
+static void reset_ir_tap_gesture()
+{
+    ir_tap_count = 0;
+    ir_first_tap_ms = 0;
+    ir_last_tap_ms = 0;
+}
+
 static void on_acknowledgement_input()
 {
     ir_activity_pending = true;
 
     /*
-     * Active reminder:
-     * one tap acknowledges immediately.
+     * A real reminder always owns the IR input. Demo/Pomodoro gestures must
+     * never delay or steal acknowledgement from an active reminder.
      */
     if (reminder_engine_has_active_reminder())
     {
-        pomodoro_first_tap_pending = false;
-        pomodoro_first_tap_ms = 0;
-
+        reset_ir_tap_gesture();
         acknowledge_current_reminder();
         return;
     }
 
-    const uint64_t now_ms =
-        application_millis();
+    const uint64_t now_ms = application_millis();
 
+#if FROST_ENABLE_DEMO_MODE
     /*
-     * First tap: wait for a second tap.
+     * While demo is already running, a fresh triple tap stops it.
+     * Individual taps do not affect the currently displayed demo frame.
      */
-    if (!pomodoro_first_tap_pending)
+#endif
+
+    if (ir_tap_count == 0)
     {
-        pomodoro_first_tap_pending = true;
-        pomodoro_first_tap_ms = now_ms;
+        ir_tap_count = 1;
+        ir_first_tap_ms = now_ms;
+        ir_last_tap_ms = now_ms;
 
-        ESP_LOGI(
-            TAG,
-            "Pomodoro first tap detected"
-        );
-
+        ESP_LOGI(TAG, "IR gesture: tap 1");
         return;
     }
 
-    const uint64_t elapsed_ms =
-        now_ms - pomodoro_first_tap_ms;
+    const uint64_t gap_ms = now_ms - ir_last_tap_ms;
 
     /*
-     * Reject sensor bounce/noise.
+     * Reject acknowledgement-input bounce/noise without destroying the
+     * current gesture.
      */
-    if (elapsed_ms < POMODORO_DOUBLE_TAP_MIN_MS)
+    if (gap_ms < IR_MULTI_TAP_MIN_MS)
     {
         ESP_LOGW(
             TAG,
-            "Second tap ignored as bounce: %llu ms",
-            static_cast<unsigned long long>(elapsed_ms)
+            "IR gesture tap ignored as bounce: %llu ms",
+            static_cast<unsigned long long>(gap_ms)
         );
-
         return;
     }
 
     /*
-     * Valid double tap: toggle once.
+     * A tap arriving after the allowed gap begins a new gesture.
      */
-    if (elapsed_ms <= POMODORO_DOUBLE_TAP_MAX_MS)
+    if (gap_ms > IR_MULTI_TAP_MAX_GAP_MS ||
+        now_ms - ir_first_tap_ms > IR_MULTI_TAP_TOTAL_WINDOW_MS)
     {
-        pomodoro_first_tap_pending = false;
-        pomodoro_first_tap_ms = 0;
+        ir_tap_count = 1;
+        ir_first_tap_ms = now_ms;
+        ir_last_tap_ms = now_ms;
 
-        ESP_LOGI(
-            TAG,
-            "Pomodoro double tap detected: %llu ms",
-            static_cast<unsigned long long>(elapsed_ms)
-        );
+        ESP_LOGI(TAG, "IR gesture restarted with tap 1");
+        return;
+    }
 
+    ++ir_tap_count;
+    ir_last_tap_ms = now_ms;
+
+    ESP_LOGI(
+        TAG,
+        "IR gesture: tap %u",
+        static_cast<unsigned>(ir_tap_count)
+    );
+
+#if FROST_ENABLE_DEMO_MODE
+    if (ir_tap_count >= 3)
+    {
+        reset_ir_tap_gesture();
+
+        if (demo_mode_is_active())
+        {
+            ESP_LOGI(TAG, "Triple tap: stopping demo mode");
+            demo_mode_stop();
+        }
+        else
+        {
+            /*
+             * Do not let a development demo take ownership while another
+             * important subsystem is already active.
+             */
+            if (bottle_calibration_is_active() ||
+                ota_manager_is_busy() ||
+                consumption_tracker_screen_active() ||
+                pomodoro_is_running())
+            {
+                ESP_LOGW(
+                    TAG,
+                    "Triple tap ignored: another subsystem owns the UI"
+                );
+                return;
+            }
+
+            ESP_LOGI(TAG, "Triple tap: starting demo mode");
+            demo_mode_start();
+        }
+
+        return;
+    }
+#endif
+}
+
+static void update_ir_tap_gesture()
+{
+    if (ir_tap_count == 0)
+    {
+        return;
+    }
+
+    const uint64_t now_ms = application_millis();
+
+    /*
+     * Once two taps are present, wait one full inter-tap gap for a possible
+     * third tap. If none arrives, it is a genuine Pomodoro double tap.
+     */
+    if (ir_tap_count == 2 &&
+        now_ms - ir_last_tap_ms > IR_MULTI_TAP_MAX_GAP_MS)
+    {
+        reset_ir_tap_gesture();
+
+#if FROST_ENABLE_DEMO_MODE
+        if (demo_mode_is_active())
+        {
+            ESP_LOGI(TAG, "Double tap ignored while demo mode is active");
+            return;
+        }
+#endif
+
+        ESP_LOGI(TAG, "IR double tap: toggling Pomodoro");
         pomodoro_toggle();
         return;
     }
 
     /*
-     * Old tap expired; this becomes the new first tap.
+     * A lone tap simply expires. This preserves the existing behaviour where
+     * one idle tap does not start a feature.
      */
-    pomodoro_first_tap_pending = true;
-    pomodoro_first_tap_ms = now_ms;
-}
-
-static void update_pomodoro_double_tap()
-{
-    if (!pomodoro_first_tap_pending)
+    if (ir_tap_count == 1 &&
+        now_ms - ir_last_tap_ms > IR_MULTI_TAP_MAX_GAP_MS)
     {
+        ESP_LOGI(TAG, "IR single tap expired");
+        reset_ir_tap_gesture();
         return;
     }
 
-    const uint64_t now_ms =
-        application_millis();
-
-    if (
-        now_ms - pomodoro_first_tap_ms >
-        POMODORO_DOUBLE_TAP_MAX_MS
-    )
+    if (now_ms - ir_first_tap_ms > IR_MULTI_TAP_TOTAL_WINDOW_MS)
     {
-        pomodoro_first_tap_pending = false;
-        pomodoro_first_tap_ms = 0;
-
-        ESP_LOGI(
-            TAG,
-            "Pomodoro single tap expired"
-        );
+        reset_ir_tap_gesture();
     }
 }
 
@@ -1814,6 +1922,13 @@ extern "C" void app_main()
         return;
     }
 
+    const esp_err_t onboarding_result = onboarding_init();
+    if (onboarding_result != ESP_OK)
+    {
+        ESP_LOGE(TAG,"Onboarding init failed: %s",esp_err_to_name(onboarding_result));
+        return;
+    }
+
     /* Mount SPIFFS and load the rolling 30-day statistics history. */
     const esp_err_t history_result = statistics_history_init();
     if (history_result != ESP_OK)
@@ -1872,10 +1987,7 @@ extern "C" void app_main()
         return;
     }
 
-    /*
-     * Keep the FROST logo visible while the DFPlayer starts.
-     * Do not send any playback command before audio_manager_init().
-     */
+    /* Always show the FROST logo first. */
     display_show_frost_logo();
 
     /* -----------------------------------------------------
@@ -1895,22 +2007,19 @@ extern "C" void app_main()
     }
     else
     {
-        /*
-         * Play /mp3/0001.mp3 while the FROST logo is visible.
-         */
-        vTaskDelay(
-            pdMS_TO_TICKS(200)
-        );
-
+        /* Play the welcome note while the FROST logo remains visible. */
+        vTaskDelay(pdMS_TO_TICKS(200));
         audio_manager_play_welcome();
     }
 
-    /*
-     * Keep the startup logo visible long enough for the welcome note.
-     */
-    vTaskDelay(
-        pdMS_TO_TICKS(2500)
-    );
+    /* Keep the logo visible during the welcome sequence. */
+    vTaskDelay(pdMS_TO_TICKS(2500));
+
+    /* Show onboarding only after logo + welcome on an unbound device. */
+    if (onboarding_is_required())
+    {
+        display_show_onboarding_qr();
+    }
 
     /* -----------------------------------------------------
      * Initialize RTC
@@ -1924,6 +2033,10 @@ extern "C" void app_main()
 
     reminder_engine_init();
     pomodoro_init();
+
+#if FROST_ENABLE_DEMO_MODE
+    demo_mode_init();
+#endif
 
     reminder_engine_set_trigger_callback(
         on_reminder_triggered
@@ -2020,6 +2133,8 @@ extern "C" void app_main()
     diagnostic_window_started_us =
         static_cast<uint64_t>(esp_timer_get_time());
 
+    system_state = determine_system_state();
+
     ESP_LOGI(
         TAG,
         "STATE: initial=%s",
@@ -2036,6 +2151,25 @@ extern "C" void app_main()
         const time_t now =
             time(nullptr);
 
+        if (bluetooth_take_bind_reset_request())
+        {
+            if (onboarding_reset_binding() == ESP_OK)
+            {
+                display_show_onboarding_qr();
+            }
+        }
+
+        if (bluetooth_take_bind_ok_request())
+        {
+            if (onboarding_confirm_binding() == ESP_OK)
+            {
+                last_idle_display_ms = 0;
+            }
+        }
+
+        const bool onboarding_active =
+            onboarding_is_required();
+
         /*
          * Lightweight common services.
          *
@@ -2043,22 +2177,21 @@ extern "C" void app_main()
          * user input, Action Log lifetime, audio/DFPlayer servicing,
          * dock detection, and BLE calibration requests.
          */
-        action_log_update();
+        bool dock_state_changed = false;
 
-        acknowledgement_input_update();
-
-        const bool dock_state_changed =
-            update_shared_ir_dock_state();
-
-        if (
-            pomodoro_first_tap_pending ||
-            ir_activity_pending
-        )
+        if (!onboarding_active)
         {
-            update_pomodoro_double_tap();
-        }
+            action_log_update();
+            acknowledgement_input_update();
+            dock_state_changed = update_shared_ir_dock_state();
 
-        audio_manager_update(now);
+            if (ir_tap_count > 0 || ir_activity_pending)
+            {
+                update_ir_tap_gesture();
+            }
+
+            audio_manager_update(now);
+        }
 
         /*
          * BLE callbacks queue calibration commands. Execute those requests
@@ -2106,6 +2239,22 @@ extern "C" void app_main()
 
         switch (system_state)
         {
+            case SystemState::ONBOARDING:
+            {
+                if (!onboarding_is_required())
+                {
+                    transition_system_state(
+                        determine_system_state(),
+                        "binding confirmed"
+                    );
+
+                    display_show_home_clock(now);
+                    last_idle_display_ms = application_millis();
+                }
+
+                break;
+            }
+
             case SystemState::CALIBRATION:
             {
                 /*
@@ -2241,6 +2390,56 @@ extern "C" void app_main()
                     );
                 }
 
+                break;
+            }
+
+            case SystemState::DEMO:
+            {
+#if FROST_ENABLE_DEMO_MODE
+                /*
+                 * Real reminders continue to be evaluated during the demo.
+                 * If one becomes active it immediately takes display/audio
+                 * ownership because REMINDER has higher state priority.
+                 */
+                reminder_engine_set_medication_only_activation(false);
+
+                const uint64_t current_ms = application_millis();
+
+                if (
+                    current_ms - last_reminder_update_ms >=
+                    REMINDER_ENGINE_INTERVAL_MS
+                )
+                {
+                    last_reminder_update_ms = current_ms;
+                    reminder_engine_update(now);
+                }
+
+                if (reminder_engine_has_active_reminder())
+                {
+                    demo_mode_stop();
+
+                    transition_system_state(
+                        SystemState::REMINDER,
+                        "real reminder interrupted demo"
+                    );
+                    break;
+                }
+
+                demo_mode_update();
+
+                if (!demo_mode_is_active())
+                {
+                    transition_system_state(
+                        determine_system_state(),
+                        "demo finished"
+                    );
+                }
+#else
+                transition_system_state(
+                    SystemState::IDLE,
+                    "demo disabled at build time"
+                );
+#endif
                 break;
             }
 

@@ -53,3 +53,5 @@ bool bluetooth_take_bottle_calibration_cancel_request(void);
  * The returned pointer remains owned by the Bluetooth module.
  */
 const char *bluetooth_get_device_name(void);
+bool bluetooth_take_bind_ok_request(void);
+bool bluetooth_take_bind_reset_request(void);

@@ -9,6 +9,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "LovyanGFX.hpp"
+#include "qrcode.h"
 
 #include "images/frost_logo.h"
 #include "images/clock_bg.h"
@@ -302,6 +303,66 @@ void display_show_frost_logo()
         FROST_LOGO_HEIGHT,
         frost_logo_data
     );
+}
+
+
+/* =========================================================
+ * First-boot onboarding QR
+ * ========================================================= */
+static constexpr char WEB_APP_URL[] = "https://app.frostactive.com/";
+
+static void draw_onboarding_qr(esp_qrcode_handle_t qrcode)
+{
+    const int size = esp_qrcode_get_size(qrcode);
+    static constexpr int QUIET = 4;
+    static constexpr int MAX_PIXELS = 200;
+    const int total = size + QUIET * 2;
+    int scale = MAX_PIXELS / total;
+    if (scale < 1) scale = 1;
+    const int pixels = total * scale;
+    const int ox = (DISPLAY_WIDTH - pixels) / 2;
+    const int oy = (DISPLAY_HEIGHT - pixels) / 2;
+
+    screen.fillSprite(TFT_WHITE);
+
+    for (int y=0; y<size; ++y)
+    {
+        for (int x=0; x<size; ++x)
+        {
+            if (esp_qrcode_get_module(qrcode,x,y))
+            {
+                screen.fillRect(
+                    ox + (x + QUIET) * scale,
+                    oy + (y + QUIET) * scale,
+                    scale,
+                    scale,
+                    TFT_BLACK
+                );
+            }
+        }
+    }
+
+    display.startWrite();
+    screen.pushSprite(0,0);
+    display.endWrite();
+}
+
+bool display_show_onboarding_qr()
+{
+    if (!display_ready || !sprite_ready) return false;
+
+    esp_qrcode_config_t cfg = ESP_QRCODE_CONFIG_DEFAULT();
+    cfg.display_func = draw_onboarding_qr;
+
+    const esp_err_t err = esp_qrcode_generate(&cfg, WEB_APP_URL);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG,"QR generation failed: %s",esp_err_to_name(err));
+        return false;
+    }
+
+    ESP_LOGI(TAG,"Onboarding QR shown: %s",WEB_APP_URL);
+    return true;
 }
 
 void display_show_hydration_reminder()
@@ -1935,9 +1996,9 @@ void display_show_consumption_screen(
     static constexpr int16_t TODAY_VALUE_Y = 108;
 
     
-    static constexpr uint16_t CONSUMED_VALUE_COLOR = 0; // Cyan-blue
+    static constexpr uint16_t CONSUMED_VALUE_COLOR = 65535; // Cyan-blue
         // White
-    static constexpr uint16_t TODAY_VALUE_COLOR = 0;    // Yellow
+    static constexpr uint16_t TODAY_VALUE_COLOR = 65535;    // Yellow
 
     screen.loadFont(font_regular);
     screen.setTextDatum(lgfx::textdatum_t::middle_center);
