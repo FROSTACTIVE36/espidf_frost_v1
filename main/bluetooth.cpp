@@ -109,6 +109,8 @@ static std::atomic_bool bottle_calibration_start_requested{false};
 static std::atomic_bool bottle_calibration_cancel_requested{false};
 static std::atomic_bool bind_ok_requested{false};
 static std::atomic_bool bind_reset_requested{false};
+static std::atomic_bool dnd_on_requested{false};
+static std::atomic_bool dnd_off_requested{false};
 
 static bluetooth_json_handler_t
     json_configuration_handler = nullptr;
@@ -723,6 +725,22 @@ static bool process_ble_command(
         return true;
     }
 
+    if (strcmp(command, "DND:ON") == 0)
+    {
+        dnd_on_requested.store(true);
+        set_ble_status("OK:DND_ON");
+        ESP_LOGI(TAG, "DND enable request queued");
+        return true;
+    }
+
+    if (strcmp(command, "DND:OFF") == 0)
+    {
+        dnd_off_requested.store(true);
+        set_ble_status("OK:DND_OFF");
+        ESP_LOGI(TAG, "DND disable request queued");
+        return true;
+    }
+
     /*
      * Device identity commands:
      *
@@ -1033,7 +1051,7 @@ static bool process_ble_command(
      *
      * Valid range: 100..10000 ml.
      */
-    static constexpr char goal_set_prefix[] = "SET GOAL ";
+    static constexpr char goal_set_prefix[] = "SET:GOAL ";
     static constexpr size_t goal_set_prefix_length =
         sizeof(goal_set_prefix) - 1;
 
@@ -2064,4 +2082,15 @@ bool bluetooth_take_bind_ok_request(void)
 bool bluetooth_take_bind_reset_request(void)
 {
     return bind_reset_requested.exchange(false);
+}
+
+
+bool bluetooth_take_dnd_on_request(void)
+{
+    return dnd_on_requested.exchange(false);
+}
+
+bool bluetooth_take_dnd_off_request(void)
+{
+    return dnd_off_requested.exchange(false);
 }

@@ -12,7 +12,7 @@
  *   docked=true  -> bottle placed back
  *
  * On a removed -> docked transition, the tracker waits five seconds,
- * obtains a stable HX711 weight, and applies the Arduino calculation.
+ * obtains a stable HX711 weight, and applies the  calculation.
  */
 esp_err_t consumption_tracker_init();
 

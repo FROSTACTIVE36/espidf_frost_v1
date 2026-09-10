@@ -174,6 +174,7 @@ static uint16_t* screen_frame_buffer = nullptr;
 static bool last_frame_valid = false;
 static bool normal_reminder_visible = false;
 static bool boot_transition_pending = false;
+static bool dnd_indicator_enabled = false;
 
 static inline uint16_t swap_rgb565_bytes(uint16_t pixel)
 {
@@ -1663,6 +1664,29 @@ static void draw_ota_full_screen_progress_arc()
     }
 }
 
+static void draw_dnd_indicator()
+{
+    if (!dnd_indicator_enabled)
+    {
+        return;
+    }
+    static constexpr int X = 187;
+    static constexpr int Y = 64;
+    static constexpr int R = 10;
+    static constexpr uint16_t BG_COLOR = 0x10C2; // RGB565 background
+
+    // Full moon disc.
+    screen.fillCircle(X, Y, R, TFT_WHITE);
+
+    // Bite out of it with the background color to leave a crescent.
+    screen.fillCircle(X + 6, Y - 3, R, BG_COLOR);
+}
+
+void display_set_dnd_indicator(bool enabled)
+{
+    dnd_indicator_enabled = enabled;
+}
+
 /* =========================================================
  * Home clock screen
  * ========================================================= */
@@ -1715,6 +1739,22 @@ void display_show_home_clock(time_t current_time)
         );
     }
 
+    static const char* WEEKDAYS[] =
+    {
+        "SUN", "MON", "TUE", "WED",
+        "THU", "FRI", "SAT"
+    };
+
+    char date_text[16] = {};
+    std::snprintf(
+        date_text,
+        sizeof(date_text),
+        "%s %02d/%02d",
+        WEEKDAYS[time_info.tm_wday],
+        time_info.tm_mday,
+        time_info.tm_mon + 1
+    );
+
     screen.loadFont(font);
 
     screen.setTextDatum(
@@ -1727,11 +1767,19 @@ void display_show_home_clock(time_t current_time)
     screen.drawString(
         time_text,
         CLOCK_CENTER_X,
-        CLOCK_CENTER_Y - 10
+        CLOCK_CENTER_Y - 20
     );
 
     screen.unloadFont();
 
+    screen.loadFont(font_small);
+    screen.setTextDatum(lgfx::textdatum_t::middle_center);
+    screen.setTextColor(TFT_WHITE);
+    screen.setTextSize(1);
+    screen.drawString(date_text, CLOCK_CENTER_X, CLOCK_CENTER_Y + 16);
+    screen.unloadFont();
+
+    draw_dnd_indicator();
     draw_ota_full_screen_progress_arc();
     draw_action_log_overlay();
 
@@ -2155,11 +2203,11 @@ void display_show_consumption_screen(
      * depend on JSON styling or reminder configuration.
      */
     
-    static constexpr int16_t CONSUMED_VALUE_X = 90;
-    static constexpr int16_t CONSUMED_VALUE_Y = 152;
+    static constexpr int16_t CONSUMED_VALUE_X = 84;
+    static constexpr int16_t CONSUMED_VALUE_Y = 142;
     
-    static constexpr int16_t TODAY_VALUE_X = 100;
-    static constexpr int16_t TODAY_VALUE_Y = 108;
+    static constexpr int16_t TODAY_VALUE_X = 94;
+    static constexpr int16_t TODAY_VALUE_Y = 94   ;
 
     
     static constexpr uint16_t CONSUMED_VALUE_COLOR = 65535; // Cyan-blue

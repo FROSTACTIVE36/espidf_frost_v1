@@ -186,6 +186,33 @@ void action_log_show_volume(uint8_t volume, uint32_t duration_ms)
     taskEXIT_CRITICAL(&lock);
 }
 
+void action_log_show_configuration_updated(uint32_t duration_ms)
+{
+    if (!initialized)
+    {
+        action_log_init();
+    }
+
+    taskENTER_CRITICAL(&lock);
+
+    // OTA keeps priority over temporary configuration notifications.
+    if (!ota_active)
+    {
+        visible = true;
+        source = ActionLogSource::CONFIGURATION;
+        indeterminate = false;
+        progress_percentage = -1;
+
+        const uint64_t current = now_ms();
+        expires_at_ms = current + duration_ms;
+        visible_since_ms = current;
+
+        copy_message("Setup Revised");
+    }
+
+    taskEXIT_CRITICAL(&lock);
+}
+
 void action_log_show_ota(const char* text, bool show_indeterminate)
 {
     if (!initialized)

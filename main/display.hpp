@@ -81,3 +81,6 @@ void display_show_consumption_screen(
     uint32_t daily_goal_ml
 );
 bool display_show_onboarding_qr();
+
+// Show/hide the Home-screen DND crescent indicator.
+void display_set_dnd_indicator(bool enabled);

@@ -107,7 +107,7 @@ void show_frame(DemoFrame frame)
             display_show_custom_reminder(
                 "Water plants",
                 120,
-                165,
+                90,
                 1,
                 65535,
                 1,

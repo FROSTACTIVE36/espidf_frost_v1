@@ -9,6 +9,7 @@ enum class ActionLogSource : uint8_t
     BOTTLE,
     BLUETOOTH,
     VOLUME,
+    CONFIGURATION,
     OTA
 };
 
@@ -42,6 +43,8 @@ void action_log_show_volume(
     uint8_t volume,
     uint32_t duration_ms = 3000
 );
+
+void action_log_show_configuration_updated(uint32_t duration_ms = 3000);
 
 void action_log_show_ota(
     const char* message,

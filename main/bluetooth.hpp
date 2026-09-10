@@ -55,3 +55,7 @@ bool bluetooth_take_bottle_calibration_cancel_request(void);
 const char *bluetooth_get_device_name(void);
 bool bluetooth_take_bind_ok_request(void);
 bool bluetooth_take_bind_reset_request(void);
+
+/** DND commands are queued by NimBLE and consumed by app_main. */
+bool bluetooth_take_dnd_on_request(void);
+bool bluetooth_take_dnd_off_request(void);

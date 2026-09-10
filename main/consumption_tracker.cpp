@@ -73,6 +73,8 @@ float previous_mean = 0.0f;
 bool previous_mean_valid = false;
 
 float last_remaining_ml = 0.0f;
+// Valid only after the actual bottle level has been measured this boot/session.
+bool remaining_baseline_valid = false;
 uint32_t last_consumed_ml = 0;
 uint32_t daily_consumed_ml = 0;
 uint32_t daily_goal_ml = DEFAULT_DAILY_GOAL_ML;
@@ -203,7 +205,6 @@ void load_daily()
 
 void reset_for_new_day_if_needed()
 {
-    static uint32_t active_day = 0;
     const uint32_t today = current_yyyymmdd();
 
     if (today == 0)
@@ -211,20 +212,50 @@ void reset_for_new_day_if_needed()
         return;
     }
 
-    if (active_day == 0)
+    /*
+     * Compare against the date persisted with the hydration total.
+     * This makes rollover reliable even after reboot or when the tracker
+     * was not being updated continuously at midnight.
+     */
+    nvs_handle_t handle = 0;
+    StoredDaily stored = {};
+    std::size_t size = sizeof(stored);
+    uint32_t stored_day = today;
+
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK)
     {
-        active_day = today;
+        const esp_err_t error =
+            nvs_get_blob(handle, NVS_KEY, &stored, &size);
+
+        nvs_close(handle);
+
+        if (
+            error == ESP_OK &&
+            size == sizeof(stored) &&
+            stored.version == STORED_VERSION &&
+            stored.yyyymmdd != 0
+        )
+        {
+            stored_day = stored.yyyymmdd;
+        }
+    }
+
+    if (stored_day == today)
+    {
         return;
     }
 
-    if (active_day != today)
-    {
-        active_day = today;
-        daily_consumed_ml = 0;
-        last_consumed_ml = 0;
-        save_daily();
-        ESP_LOGI(TAG, "Daily hydration total reset for new day");
-    }
+    // Reset consumed hydration only. Keep the user's daily goal.
+    daily_consumed_ml = 0;
+    last_consumed_ml = 0;
+    save_daily();
+
+    ESP_LOGI(
+        TAG,
+        "Daily hydration total reset: %lu -> %lu",
+        static_cast<unsigned long>(stored_day),
+        static_cast<unsigned long>(today)
+    );
 }
 
 float trimmed_mean_and_range(float& range)
@@ -368,11 +399,12 @@ void process_weight(float total_grams)
         last_remaining_ml
     );
 
-    /* Arduino first-reading behaviour: establish baseline only. */
-    if (last_remaining_ml <= 0.0f)
+    /* First stable reading after boot establishes the actual bottle baseline only. */
+    if (!remaining_baseline_valid)
     {
         last_remaining_ml = water_ml;
-        ESP_LOGI(TAG, "First reading; baseline set to %.1fml", water_ml);
+        remaining_baseline_valid = true;
+        ESP_LOGI(TAG, "Runtime bottle baseline established at %.1fml; no consumption recorded", water_ml);
         return;
     }
 
@@ -430,11 +462,9 @@ esp_err_t consumption_tracker_init()
 
     load_daily();
 
-    const ScaleCalibration& calibration = scale_get_calibration();
-    if (calibration.valid && calibration.capacity_ml > 0.0f)
-    {
-        last_remaining_ml = calibration.capacity_ml;
-    }
+    // Never assume the bottle is full after reboot. Measure its actual level first.
+    last_remaining_ml = 0.0f;
+    remaining_baseline_valid = false;
 
     initialized = true;
 
@@ -478,6 +508,7 @@ void consumption_tracker_set_initial_remaining(float remaining_ml)
     }
 
     last_remaining_ml = remaining_ml;
+    remaining_baseline_valid = true;
     ESP_LOGI(TAG, "Consumption baseline set to %.1f ml", last_remaining_ml);
 }
 
@@ -492,6 +523,17 @@ void consumption_tracker_set_docked(bool new_docked)
     {
         dock_state_known = true;
         docked = new_docked;
+
+        // If the bottle is already docked after reboot, measure it once to
+        // establish the real baseline without recording consumption.
+        if (docked && !remaining_baseline_valid)
+        {
+            state = TrackerState::SETTLING;
+            settling_started_ms = now_ms();
+            reset_measurement_window();
+            ESP_LOGI(TAG, "Initial docked bottle detected; establishing reboot baseline");
+        }
+
         return;
     }
 

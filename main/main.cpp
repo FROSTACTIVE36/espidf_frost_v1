@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "sdkconfig.h"
 
 #include "acknowledgement_input.hpp"
@@ -692,8 +693,8 @@ static bool update_shared_ir_dock_state()
 
     action_log_show_bottle(
         dock_reported_state
-            ? "detected"
-            : "removed"
+            ? "Docked"
+            : "Undocked"
     );
 
     audio_manager_set_dock_state(dock_reported_state);
@@ -887,28 +888,8 @@ static const char* REMINDER_JSON = R"json(
           ],
 
           "text_x": 120,
-          "text_y": 165,
+          "text_y": 100,
           "text_size": 2,
-          "text_color": 65535,
-          "text_align": 1,
-          "text_width": 180
-        },
-
-        {
-          "id": "custom_002",
-          "label": "Doctor appointment",
-          "enabled": true,
-
-          "h": 14,
-          "m": 30,
-
-          "show_ms": 15000,
-          "type": "absolute",
-          "date": "2026-12-25",
-
-          "text_x": 120,
-          "text_y": 160,
-          "text_size": 1,
           "text_color": 65535,
           "text_align": 1,
           "text_width": 180
@@ -1742,12 +1723,62 @@ static bool apply_bluetooth_json(
      */
     pomodoro_force_redraw();
 
+    /*
+     * This path is used only for configuration received from the app over
+     * BLE. Show the confirmation only after the JSON was successfully parsed,
+     * applied and persisted in NVS. Startup/default configuration loading
+     * therefore does not generate this Action Log notification.
+     */
+    action_log_show_configuration_updated();
+
     ESP_LOGI(
         TAG,
         "Bluetooth configuration applied"
     );
 
     return true;
+}
+
+static constexpr char DND_NVS_NAMESPACE[] = "frost_dnd";
+static constexpr char DND_NVS_KEY[] = "enabled";
+
+static bool load_dnd_state()
+{
+    nvs_handle_t handle = 0;
+    if (nvs_open(DND_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK)
+        return false;
+    uint8_t value = 0;
+    const esp_err_t err = nvs_get_u8(handle, DND_NVS_KEY, &value);
+    nvs_close(handle);
+    return err == ESP_OK && value != 0;
+}
+
+static bool save_dnd_state(bool enabled)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open(DND_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return false;
+    err = nvs_set_u8(handle, DND_NVS_KEY, enabled ? 1 : 0);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    return err == ESP_OK;
+}
+
+static void apply_dnd_state(bool enabled)
+{
+    reminder_engine_set_dnd(enabled);
+    display_set_dnd_indicator(enabled);
+
+    // If DND is switched on while a non-medication reminder is visible,
+    // stop it immediately. Medication is always allowed.
+    if (enabled && reminder_engine_has_active_reminder() &&
+        reminder_engine_get_active_type() != ReminderType::MEDICATION)
+    {
+        reminder_engine_cancel_active();
+    }
+
+    last_idle_display_ms = 0;
+    ESP_LOGI(TAG, "DND %s", enabled ? "ON" : "OFF");
 }
 
 /* =========================================================
@@ -2034,6 +2065,9 @@ extern "C" void app_main()
     reminder_engine_init();
     pomodoro_init();
 
+    const bool saved_dnd_enabled = load_dnd_state();
+    apply_dnd_state(saved_dnd_enabled);
+
 #if FROST_ENABLE_DEMO_MODE
     demo_mode_init();
 #endif
@@ -2164,6 +2198,30 @@ extern "C" void app_main()
             if (onboarding_confirm_binding() == ESP_OK)
             {
                 last_idle_display_ms = 0;
+            }
+        }
+
+        if (bluetooth_take_dnd_on_request())
+        {
+            if (save_dnd_state(true))
+            {
+                apply_dnd_state(true);
+            }
+            else
+            {
+                ESP_LOGE(TAG, "Could not persist DND ON state");
+            }
+        }
+
+        if (bluetooth_take_dnd_off_request())
+        {
+            if (save_dnd_state(false))
+            {
+                apply_dnd_state(false);
+            }
+            else
+            {
+                ESP_LOGE(TAG, "Could not persist DND OFF state");
             }
         }
 
@@ -2474,6 +2532,26 @@ extern "C" void app_main()
                     transition_system_state(
                         SystemState::REMINDER,
                         "reminder activated"
+                    );
+
+                    break;
+                }
+
+                /*
+                 * Service lap-mode scheduling while Pomodoro is stopped.
+                 * pomodoro_update() detects whether the current RTC time is
+                 * inside an enabled lap and auto-starts the first focus stage.
+                 *
+                 * This must run from IDLE because SystemState::POMODORO is
+                 * entered only after pomodoro_is_running() becomes true.
+                 */
+                pomodoro_update();
+
+                if (pomodoro_is_running())
+                {
+                    transition_system_state(
+                        SystemState::POMODORO,
+                        "scheduled Pomodoro lap activated"
                     );
 
                     break;

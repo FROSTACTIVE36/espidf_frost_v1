@@ -125,6 +125,7 @@ static SnoozedReminder snoozed_reminder;
  * remain queued until normal activation is restored.
  */
 static bool medication_only_activation = false;
+static bool dnd_enabled = false;
 
 static uint64_t current_millis()
 {
@@ -336,7 +337,6 @@ static const char* reminder_type_name(
     }
 }
 
-
 static const char* statistics_token_id(
     ReminderType type,
     int item_index
@@ -412,6 +412,21 @@ static bool enqueue_reminder(
     const QueuedReminder& reminder
 )
 {
+    if (dnd_enabled && reminder.type != ReminderType::MEDICATION)
+    {
+        /*
+         * DND suppression counts as a consumed schedule event.
+         * This prevents repeated retries and prevents the reminder from
+         * firing later after DND is disabled.
+         */
+        ESP_LOGI(
+            TAG,
+            "DND skipped %s",
+            reminder_type_name(reminder.type)
+        );
+        return true;
+    }
+
     if (queue_count >= REMINDER_QUEUE_SIZE)
     {
         ESP_LOGW(
@@ -1223,6 +1238,7 @@ void reminder_engine_init()
     snoozed_reminder = {};
 
     medication_only_activation = false;
+    dnd_enabled = false;
 
     user_statistics_init();
 
@@ -1371,6 +1387,67 @@ void reminder_engine_set_medication_only_activation(
     }
 }
 
+void reminder_engine_set_dnd(bool enabled)
+{
+    if (dnd_enabled == enabled)
+    {
+        return;
+    }
+
+    dnd_enabled = enabled;
+
+    if (dnd_enabled)
+    {
+        /*
+         * DND means skip, not postpone.
+         * Keep only medication reminders that were already queued.
+         */
+        QueuedReminder retained[REMINDER_QUEUE_SIZE] = {};
+        std::size_t retained_count = 0;
+
+        for (std::size_t i = 0; i < queue_count; ++i)
+        {
+            const std::size_t index =
+                (queue_head + i) % REMINDER_QUEUE_SIZE;
+
+            if (reminder_queue[index].type == ReminderType::MEDICATION)
+            {
+                retained[retained_count++] =
+                    reminder_queue[index];
+            }
+        }
+
+        queue_head = 0;
+        queue_tail = 0;
+        queue_count = 0;
+
+        for (std::size_t i = 0; i < retained_count; ++i)
+        {
+            reminder_queue[queue_tail] = retained[i];
+
+            queue_tail =
+                (queue_tail + 1) %
+                REMINDER_QUEUE_SIZE;
+
+            ++queue_count;
+        }
+
+        ack_preview_active = false;
+        ack_preview_remaining = 0;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "DND %s",
+        enabled ? "enabled" : "disabled"
+    );
+}
+
+bool reminder_engine_is_dnd_enabled()
+{
+    return dnd_enabled;
+}
+
 void reminder_engine_update(
     std::time_t current_time
 )
@@ -1389,11 +1466,6 @@ void reminder_engine_update(
 
         if (timed_out)
         {
-            /*
-             * Only reminders that were waiting for acknowledgement are
-             * counted as missed. Five-second queue previews and ordinary
-             * informational screens are not counted as misses.
-             */
             if (active_reminder.require_ack)
             {
                 user_statistics_record_miss(
