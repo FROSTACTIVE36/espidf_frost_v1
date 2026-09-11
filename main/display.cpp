@@ -61,9 +61,9 @@ static constexpr int CLOCK_PROGRESS_WIDTH = 6;
 /*
  * Pomodoro progress geometry copied from the working Arduino version.
  */
-static constexpr int POMODORO_CENTER_X = 118;
+static constexpr int POMODORO_CENTER_X = 120;
 static constexpr int POMODORO_CENTER_Y = 120;
-static constexpr int POMODORO_CLOCK_RADIUS = 105;
+static constexpr int POMODORO_CLOCK_RADIUS = 111;
 static constexpr int POMODORO_PROGRESS_RADIUS = POMODORO_CLOCK_RADIUS + 2;
 static constexpr int POMODORO_PROGRESS_WIDTH = 7;
 

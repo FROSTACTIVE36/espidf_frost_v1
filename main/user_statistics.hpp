@@ -24,6 +24,10 @@ void user_statistics_record_medication_snooze(
 );
 
 void user_statistics_add_hydration_ml(uint32_t amount_ml);
+
+/* Clears only today's hydration millilitres; other statistics are preserved. */
+void user_statistics_reset_hydration_ml();
+
 void user_statistics_reset_today();
 
 /*

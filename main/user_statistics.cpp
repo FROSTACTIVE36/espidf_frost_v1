@@ -411,6 +411,24 @@ void user_statistics_reset_today()
     save();
 }
 
+void user_statistics_reset_hydration_ml()
+{
+    if (!initialized)
+    {
+        return;
+    }
+
+    /*
+     * If the date changed, archive/roll over the completed statistics day
+     * first. Then clear only today's hydration amount.
+     */
+    ensure_current_day();
+    statistics_data.hydration_ml = 0;
+    save();
+
+    ESP_LOGI(TAG, "Hydration ML statistics reset to 0");
+}
+
 std::size_t user_statistics_line_count()
 {
     if (!initialized) return 0;

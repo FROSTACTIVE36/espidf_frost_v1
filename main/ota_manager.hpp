@@ -4,7 +4,7 @@
 #include "esp_err.h"
 
 #define FROST_FIRMWARE_VERSION "1.1.4"
-#define FROST_VERSION_JSON_URL "https://github.com/Jeevuppendra/frost-ota/raw/refs/heads/main/version.json"
+#define FROST_VERSION_JSON_URL "https://raw.githubusercontent.com/Jeevuppendra/frost-ota/refs/heads/main/version.json"
 #define FROST_FIRMWARE_BIN_URL "https://github.com/Jeevuppendra/frost-ota/raw/refs/heads/main/firmware.bin"
 
 esp_err_t ota_manager_init();

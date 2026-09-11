@@ -250,6 +250,9 @@ void reset_for_new_day_if_needed()
     last_consumed_ml = 0;
     save_daily();
 
+    /* Keep HYD:ML statistics synchronized with the tracker rollover. */
+    user_statistics_reset_hydration_ml();
+
     ESP_LOGI(
         TAG,
         "Daily hydration total reset: %lu -> %lu",
@@ -692,7 +695,16 @@ void consumption_tracker_set_daily_goal_ml(uint32_t goal_ml)
 
 void consumption_tracker_reset_daily()
 {
+    /*
+     * Reset the running hydration total but preserve the current bottle
+     * baseline so the next real drink is measured normally.
+     */
     daily_consumed_ml = 0;
     last_consumed_ml = 0;
     save_daily();
+
+    /* Reset only hydration ML in statistics; keep all other counters. */
+    user_statistics_reset_hydration_ml();
+
+    ESP_LOGI(TAG, "Hydration consumption total and HYD:ML reset to 0");
 }

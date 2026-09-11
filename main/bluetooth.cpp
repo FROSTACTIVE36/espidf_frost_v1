@@ -1307,6 +1307,16 @@ static bool process_ble_command(
         return true;
     }
 
+    if (strcmp(command, "CONSUMPTION_RESET") == 0)
+    {
+        consumption_tracker_reset_daily();
+        set_ble_status("CONSUMPTION_RESET_OK");
+
+        
+
+        return true;
+    }
+
     if (strcmp(command, "STATS:RESET") == 0)
     {
         user_statistics_reset_today();

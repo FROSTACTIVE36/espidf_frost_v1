@@ -317,11 +317,14 @@ void pomodoro_set_config(
 
     active_lap_index = -1;
 
-    if (
-        !pomodoro_config.enabled &&
-        was_running
-    )
+    if (!pomodoro_config.enabled)
     {
+        /*
+         * A disabled configuration must leave Pomodoro completely inactive.
+         * Stop audio as well, even if runtime state is already STOPPED, so a
+         * stale/queued Pomodoro audio sequence cannot continue after config
+         * is disabled.
+         */
         pomodoro_stop();
     }
 
@@ -412,6 +415,22 @@ void pomodoro_stop()
 
 void pomodoro_toggle()
 {
+    /*
+     * Manual IR/double-tap control must obey the JSON "enabled" flag.
+     * When disabled, ignore the gesture completely and make sure no
+     * Pomodoro audio remains active.
+     */
+    if (!pomodoro_config.enabled)
+    {
+        ESP_LOGI(
+            TAG,
+            "Pomodoro toggle ignored because it is disabled"
+        );
+
+        audio_manager_stop_pomodoro();
+        return;
+    }
+
     if (pomodoro_running)
     {
         pomodoro_stop();
@@ -424,6 +443,22 @@ void pomodoro_toggle()
 
 void pomodoro_update()
 {
+    /*
+     * Disabled means fully disabled for both manual and scheduled paths.
+     * This guard also self-recovers any inconsistent runtime/audio state.
+     */
+    if (!pomodoro_config.enabled)
+    {
+        active_lap_index = -1;
+
+        if (pomodoro_running)
+        {
+            pomodoro_stop();
+        }
+
+        return;
+    }
+
     /*
      * Lap mode owns automatic start and stop.
      *
