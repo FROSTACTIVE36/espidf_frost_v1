@@ -88,15 +88,26 @@ static bool time_inside_lap(
             lap.end_minute
         );
 
-    if (start <= end)
+    /*
+     * Lap windows use an inclusive start and exclusive end.
+     * Example: 12:30 -> 12:54 is inactive from 12:54:00 onward.
+     */
+    if (start < end)
     {
-        return current >= start && current <= end;
+        return current >= start && current < end;
     }
 
     /*
      * Overnight lap, for example 22:00 to 07:00.
+     * The end boundary is exclusive here as well.
      */
-    return current >= start || current <= end;
+    if (start > end)
+    {
+        return current >= start || current < end;
+    }
+
+    /* Equal start/end defines an empty lap window. */
+    return false;
 }
 
 static int find_active_lap()
