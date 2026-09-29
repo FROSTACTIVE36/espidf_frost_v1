@@ -24,10 +24,7 @@
 #include "images/rule.h"
 #include "images/short_walk.h"
 #include "images/medication_background.h"
-#include "images/custom_background.h"
 #include "images/meditation.h"
-#include "images/pomodoro_focus_bg.h"
-#include "images/pomodoro_break_bg.h"
 #include "images/hydration_consumption.h"
 #include "images/bottle_clean.h"
 
@@ -1044,12 +1041,45 @@ void display_show_custom_reminder(
         0,
         DISPLAY_WIDTH,
         DISPLAY_HEIGHT,
-        custom_background
+        clock_bg_data
     );
 
     /*
-     * Match the Arduino custom-reminder UI by using font_regular.
-     * The wrapped-text helper now uses the font's actual height.
+     * Draw a clean, compact notification bell instead of the dynamic
+     * "REMINDER" heading.  Its visual centre shares the same Y position
+     * as the FROST, FOCUS and BREAK headings.
+     */
+    static constexpr int BELL_X = 120;
+    static constexpr int BELL_Y = 45;
+    static constexpr uint16_t BELL_COLOR = TFT_WHITE;
+
+    // Top loop and rounded bell body.
+    screen.fillCircle(BELL_X, BELL_Y - 14, 3, BELL_COLOR);
+    screen.fillRoundRect(BELL_X - 9, BELL_Y - 11, 18, 20, 9, BELL_COLOR);
+
+    // Flared skirt, smooth lower rim and clapper.
+    screen.fillTriangle(
+        BELL_X - 9,  BELL_Y + 3,
+        BELL_X + 9,  BELL_Y + 3,
+        BELL_X + 13, BELL_Y + 10,
+        BELL_COLOR
+    );
+    screen.fillTriangle(
+        BELL_X - 9,  BELL_Y + 3,
+        BELL_X - 13, BELL_Y + 10,
+        BELL_X + 13, BELL_Y + 10,
+        BELL_COLOR
+    );
+    screen.fillRoundRect(BELL_X - 13, BELL_Y + 8, 26, 4, 2, BELL_COLOR);
+    screen.fillCircle(BELL_X, BELL_Y + 15, 3, BELL_COLOR);
+
+    // Small ringing marks make the icon clearer at 240 x 240 resolution.
+    screen.drawLine(BELL_X - 15, BELL_Y - 8, BELL_X - 18, BELL_Y - 4, BELL_COLOR);
+    screen.drawLine(BELL_X + 15, BELL_Y - 8, BELL_X + 18, BELL_Y - 4, BELL_COLOR);
+
+    /*
+     * Keep the user-configured custom reminder label exactly as before.
+     * font_regular remains the label font.
      */
     screen.loadFont(font_regular);
     screen.setTextSize(1);
@@ -1105,7 +1135,7 @@ void display_show_meditation_reminder()
  * ========================================================= */
 
 static void draw_pomodoro_counter(
-    const uint16_t* background,
+    const char* heading,
     uint32_t remaining_seconds,
     uint32_t total_seconds,
     const PomodoroCounterStyle& style,
@@ -1147,7 +1177,7 @@ static void draw_pomodoro_counter(
         0,
         DISPLAY_WIDTH,
         DISPLAY_HEIGHT,
-        background
+        clock_bg_data
     );
 
     /*
@@ -1217,7 +1247,17 @@ static void draw_pomodoro_counter(
     }
 
     /*
-     * Use the same custom font as the home clock.
+     * Dynamic Pomodoro heading uses font_regular for both Focus and Break.
+     */
+    screen.loadFont(font_regular);
+    screen.setTextDatum(lgfx::textdatum_t::middle_center);
+    screen.setTextColor(TFT_WHITE);
+    screen.setTextSize(1);
+    screen.drawString(heading != nullptr ? heading : "", 120, 45);
+    screen.unloadFont();
+
+    /*
+     * Keep the existing timer font and JSON-configurable timer position.
      */
     screen.loadFont(font);
 
@@ -1252,7 +1292,7 @@ void display_show_pomodoro_focus(
 )
 {
     draw_pomodoro_counter(
-        pomodoro_focus_bg_data,
+        "FOCUS",
         remaining_seconds,
         total_seconds,
         style,
@@ -1267,7 +1307,7 @@ void display_show_pomodoro_break(
 )
 {
     draw_pomodoro_counter(
-        pomodoro_break_bg_data,
+        "BREAK",
         remaining_seconds,
         total_seconds,
         style,
@@ -1770,6 +1810,17 @@ void display_show_home_clock(time_t current_time)
         CLOCK_CENTER_Y - 20
     );
 
+    screen.unloadFont();
+
+    /*
+     * Dynamic Home heading. The clock background remains unchanged;
+     * FROST is rendered at runtime using font_regular.
+     */
+    screen.loadFont(font_regular);
+    screen.setTextDatum(lgfx::textdatum_t::middle_center);
+    screen.setTextColor(TFT_WHITE);
+    screen.setTextSize(1);
+    screen.drawString("FROST", CLOCK_CENTER_X, 45);
     screen.unloadFont();
 
     screen.loadFont(font_small);
