@@ -51,6 +51,11 @@ static const char* TAG = "FROST_MAIN";
 #define FROST_ENABLE_DEMO_MODE 1
 #endif
 
+/* Set to 1 to allow an idle IR double tap to toggle Pomodoro. */
+#ifndef FROST_ENABLE_IR_DOUBLE_TAP
+#define FROST_ENABLE_IR_DOUBLE_TAP 0
+#endif
+
 /* =========================================================
  * Top-level system state machine
  * ========================================================= */
@@ -720,105 +725,138 @@ static const char* REMINDER_JSON = R"json(
     "schema_ver": 6,
     "device": "FROST"
   },
-
   "reminders": {
     "hydration": {
       "enabled": true,
-      "mode": "interval",
-      "interval_ms": 60000,
+      "start_date": "2026-09-29",
+      "end_date": "2027-09-28",
+      "days": [],
+      "abs": {
+        "times": [
+          {
+            "h": 9,
+            "m": 0
+          },
+          {
+            "h": 11,
+            "m": 30
+          },
+          {
+            "h": 15,
+            "m": 0
+          }
+        ]
+      },
       "display_ms": 10000,
-      "require_ack": false,
-      "start_hour": 0,
-      "start_min": 0,
-      "end_hour": 23,
-      "end_min": 59,
-      "days": []
+      "require_ack": true
     },
-
     "stretch": {
       "enabled": true,
-      "mode": "interval",
-      "interval_ms": 120000,
+      "start_date": "2026-09-29",
+      "end_date": "2027-09-28",
+      "days": [],
+      "abs": {
+        "times": [
+          {
+            "h": 12,
+            "m": 0
+          },
+          {
+            "h": 17,
+            "m": 0
+          }
+        ]
+      },
       "display_ms": 10000,
-      "require_ack": false,
-      "start_hour": 0,
-      "start_min": 0,
-      "end_hour": 23,
-      "end_min": 59,
-      "days": []
+      "require_ack": true
     },
-
     "eye": {
       "enabled": true,
-      "mode": "interval",
-      "interval_ms": 180000,
+      "start_date": "2026-09-29",
+      "end_date": "2027-09-28",
+      "days": [],
+      "abs": {
+        "times": [
+          {
+            "h": 10,
+            "m": 0
+          },
+          {
+            "h": 16,
+            "m": 0
+          }
+        ]
+      },
       "display_ms": 10000,
-      "require_ack": false,
-      "start_hour": 0,
-      "start_min": 0,
-      "end_hour": 23,
-      "end_min": 59,
-      "days": []
+      "require_ack": true
     },
-
     "walk": {
       "enabled": true,
-      "mode": "interval",
-      "interval_ms": 240000,
+      "start_date": "2026-09-29",
+      "end_date": "2027-09-28",
+      "days": [],
+      "abs": {
+        "times": [
+          {
+            "h": 8,
+            "m": 0
+          }
+        ]
+      },
       "display_ms": 10000,
-      "require_ack": false,
-      "start_hour": 0,
-      "start_min": 0,
-      "end_hour": 23,
-      "end_min": 59,
-      "days": []
+      "require_ack": true
     },
-
-
     "bottle_clean": {
       "enabled": true,
+      "start_date": "2026-09-29",
+      "end_date": "2027-09-28",
       "interval_days": 7,
-      "hour": 17,
-      "minute": 0,
+      "time": {
+        "h": 17,
+        "m": 0
+      },
       "display_ms": 15000,
       "require_ack": true
     },
-
     "meditation": {
       "enabled": false,
-      "sh": 6,
-      "sm": 0,
-      "eh": 7,
-      "em": 0,
-      "display_sec": 600,
-      "require_ack": false,
-      "days": []
+      "start_date": "2026-09-29",
+      "end_date": "2027-09-28",
+      "days": [],
+      "times": [
+        {
+          "start": {
+            "h": 6,
+            "m": 0
+          },
+          "end": {
+            "h": 7,
+            "m": 0
+          }
+        }
+      ],
+      "display_ms": 600000,
+      "require_ack": true
     },
-
     "medication": {
       "enabled": true,
-      "require_ack": false,
+      "require_ack": true,
       "snooze_min": 10,
       "display_ms": 15000,
-
       "medicines": [
         {
           "id": "med_001",
           "label": "Vitamin D",
           "enabled": true,
-
           "start": "2026-01-01",
           "end": "2026-12-31",
-
           "days": null,
-
           "text_x": 120,
           "text_y": 160,
           "text_size": 2,
           "text_color": 65535,
           "text_align": 1,
           "text_width": 180,
-
           "doses": [
             {
               "h": 8,
@@ -834,24 +872,19 @@ static const char* REMINDER_JSON = R"json(
             }
           ]
         },
-
         {
           "id": "med_002",
           "label": "BP Tablet",
           "enabled": true,
-
           "start": "2026-01-01",
           "end": "2026-12-31",
-
           "days": [],
-
           "text_x": 120,
           "text_y": 160,
           "text_size": 2,
           "text_color": 65535,
           "text_align": 1,
           "text_width": 180,
-
           "doses": [
             {
               "h": 9,
@@ -865,66 +898,85 @@ static const char* REMINDER_JSON = R"json(
         }
       ]
     },
-
     "custom": {
       "enabled": true,
-      "require_ack": false,
-
+      "display_ms": 15000,
+      "require_ack": true,
       "events": [
         {
           "id": "custom_001",
           "label": "Water plants",
-          "enabled": true,
-
-          "h": 9,
-          "m": 0,
-
-          "show_ms": 15000,
-          "type": "recurring",
-
           "days": [
             "mon",
             "wed"
           ],
-
           "text_x": 120,
           "text_y": 100,
           "text_size": 2,
           "text_color": 65535,
           "text_align": 1,
-          "text_width": 180
+          "text_width": 180,
+          "start_date": "2026-09-29",
+          "end_date": "2027-09-28",
+          "times": [
+            {
+              "h": 9,
+              "m": 0
+            },
+            {
+              "h": 16,
+              "m": 0
+            }
+          ]
         }
       ]
     }
   },
-
   "audio": {
     "volume": 20,
     "pomodoro": {
       "enabled": true,
-      "tracks": [20, 21]
+      "tracks": [
+        20,
+        21
+      ]
     },
     "meditation": {
       "enabled": true,
-      "tracks": [22]
+      "tracks": [
+        22
+      ]
     },
     "healing": {
       "enabled": true,
       "require_dock": true,
-      "tracks": [60, 61, 62]
+      "tracks": [
+        60,
+        61,
+        62
+      ]
     },
     "healing_schedules": [
       {
         "enabled": true,
         "start_time": "06:00",
         "end_time": "07:00",
-        "days": ["mon", "tue", "wed", "thu", "fri"]
+        "days": [
+          "mon",
+          "tue",
+          "wed",
+          "thu",
+          "fri"
+        ]
       },
       {
         "enabled": true,
         "start_time": "12:30",
         "end_time": "13:00",
-        "days": ["sat", "sun"]
+        "days": [
+          "sat",
+          "sun"
+        ]
       },
       {
         "enabled": true,
@@ -934,35 +986,17 @@ static const char* REMINDER_JSON = R"json(
       }
     ]
   },
-
   "pomodoro": {
     "enabled": true,
-
+    "start_date": "2026-09-29",
+    "end_date": "2027-09-28",
+    "days": [],
     "focus_min": 25,
     "break_min": 5,
-    "cycles": 4,
-
-    "auto_start_break": true,
-    "auto_start_focus": true,
-
-    "lap_mode_enabled": false,
     "laps": [
-      {
-        "enabled": true,
-        "sh": 9,
-        "sm": 0,
-        "eh": 12,
-        "em": 0
-      },
-      {
-        "enabled": true,
-        "sh": 14,
-        "sm": 0,
-        "eh": 17,
-        "em": 0
-      }
+      {"start": {"h": 9, "m": 0}, "cycles": 4},
+      {"start": {"h": 14, "m": 0}, "cycles": 4}
     ],
-
     "focus_counter": {
       "x": 120,
       "y": 150,
@@ -970,7 +1004,6 @@ static const char* REMINDER_JSON = R"json(
       "text_color": 65535,
       "text_align": 1
     },
-
     "break_counter": {
       "x": 120,
       "y": 150,
@@ -1582,8 +1615,12 @@ static void update_ir_tap_gesture()
         }
 #endif
 
+#if FROST_ENABLE_IR_DOUBLE_TAP
         ESP_LOGI(TAG, "IR double tap: toggling Pomodoro");
         pomodoro_toggle();
+#else
+        ESP_LOGI(TAG, "IR double tap: Pomodoro gesture disabled");
+#endif
         return;
     }
 

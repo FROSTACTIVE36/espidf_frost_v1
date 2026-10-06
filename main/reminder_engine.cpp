@@ -15,8 +15,6 @@ static constexpr uint32_t ACK_QUEUE_PREVIEW_MS = 5000;
 
 struct StandardReminderRuntime
 {
-    uint64_t last_trigger_ms = 0;
-
     int last_absolute_year = -1;
     int last_absolute_year_day = -1;
     int last_absolute_minute = -1;
@@ -26,6 +24,7 @@ struct MeditationRuntime
 {
     int last_trigger_year = -1;
     int last_trigger_year_day = -1;
+    int last_trigger_minute = -1;
 };
 
 struct MedicationDoseRuntime
@@ -37,8 +36,6 @@ struct MedicationDoseRuntime
 
 struct BottleCleanRuntime
 {
-    bool anchor_initialized = false;
-    int64_t anchor_day = 0;
     int last_trigger_year = -1;
     int last_trigger_year_day = -1;
 };
@@ -265,18 +262,6 @@ static bool date_inside_range(
     }
 
     return true;
-}
-
-static bool same_calendar_date(
-    const std::tm& time_info,
-    const ReminderDate& date
-)
-{
-    return
-        valid_date(date) &&
-        time_info.tm_year + 1900 == date.year &&
-        time_info.tm_mon + 1 == date.month &&
-        time_info.tm_mday == date.day;
 }
 
 static int standard_type_to_index(
@@ -699,198 +684,77 @@ static void start_next_queued_reminder()
     }
 }
 
-static void update_standard_reminder(
-    ReminderType type,
-    const std::tm& time_info,
-    uint64_t now_ms
-)
+static void update_standard_reminder(ReminderType type, const std::tm& time_info)
 {
-    const int index =
-        standard_type_to_index(type);
-
-    if (index < 0)
+    const int index = standard_type_to_index(type);
+    if (index < 0) return;
+    const ReminderConfig& config = standard_configs[index];
+    StandardReminderRuntime& runtime = standard_runtime[index];
+    if (!config.enabled || !day_allowed(config.day_mask, time_info.tm_wday) ||
+        !valid_date(config.start_date) || !valid_date(config.end_date) ||
+        !date_inside_range(time_info, config.start_date, config.end_date))
     {
         return;
     }
-
-    const ReminderConfig& config =
-        standard_configs[index];
-
-    StandardReminderRuntime& runtime =
-        standard_runtime[index];
-
-    if (!config.enabled)
+    const int current_minute = minutes_from_midnight(
+        time_info.tm_hour, time_info.tm_min);
+    for (std::size_t i = 0; i < config.absolute_time_count; ++i)
     {
-        return;
-    }
-
-    if (!day_allowed(config.day_mask, time_info.tm_wday))
-    {
-        return;
-    }
-
-    if (
-        !time_inside_window(
-            time_info.tm_hour,
-            time_info.tm_min,
-            config.start_hour,
-            config.start_minute,
-            config.end_hour,
-            config.end_minute
-        )
-    )
-    {
-        return;
-    }
-
-    QueuedReminder reminder;
-
-    reminder.type = type;
-    reminder.display_ms = config.display_ms;
-    reminder.require_ack = config.require_ack;
-
-    if (config.mode == ReminderMode::INTERVAL)
-    {
-        if (config.interval_ms == 0)
-        {
-            return;
-        }
-
-        if (runtime.last_trigger_ms == 0)
-        {
-            runtime.last_trigger_ms = now_ms;
-            return;
-        }
-
-        if (
-            now_ms - runtime.last_trigger_ms >=
-            config.interval_ms
-        )
-        {
-            if (enqueue_reminder(reminder))
-            {
-                runtime.last_trigger_ms = now_ms;
-            }
-        }
-
-        return;
-    }
-
-    const int current_minute =
-        minutes_from_midnight(
-            time_info.tm_hour,
-            time_info.tm_min
-        );
-
-    for (
-        std::size_t i = 0;
-        i < config.absolute_time_count;
-        ++i
-    )
-    {
-        const ReminderTime& configured_time =
-            config.absolute_times[i];
-
-        const int configured_minute =
-            minutes_from_midnight(
-                configured_time.hour,
-                configured_time.minute
-            );
-
-        if (current_minute != configured_minute)
-        {
+        const ReminderTime& time = config.absolute_times[i];
+        if (current_minute != minutes_from_midnight(time.hour, time.minute))
             continue;
-        }
-
-        const bool already_fired =
-            runtime.last_absolute_year ==
-                time_info.tm_year &&
-            runtime.last_absolute_year_day ==
-                time_info.tm_yday &&
-            runtime.last_absolute_minute ==
-                current_minute;
-
-        if (already_fired)
-        {
+        if (runtime.last_absolute_year == time_info.tm_year &&
+            runtime.last_absolute_year_day == time_info.tm_yday &&
+            runtime.last_absolute_minute == current_minute)
             return;
-        }
-
-        reminder.schedule_index =
-            static_cast<int>(i);
-
+        QueuedReminder reminder;
+        reminder.type = type;
+        reminder.display_ms = config.display_ms;
+        reminder.require_ack = config.require_ack;
+        reminder.schedule_index = static_cast<int>(i);
         if (enqueue_reminder(reminder))
         {
-            runtime.last_absolute_year =
-                time_info.tm_year;
-
-            runtime.last_absolute_year_day =
-                time_info.tm_yday;
-
-            runtime.last_absolute_minute =
-                current_minute;
+            runtime.last_absolute_year = time_info.tm_year;
+            runtime.last_absolute_year_day = time_info.tm_yday;
+            runtime.last_absolute_minute = current_minute;
         }
-
         return;
     }
 }
 
-static void update_meditation(
-    const std::tm& time_info
-)
+static void update_meditation(const std::tm& time_info)
 {
-    if (!meditation_config.enabled)
-    {
+    if (!meditation_config.enabled ||
+        !day_allowed(meditation_config.day_mask, time_info.tm_wday) ||
+        !valid_date(meditation_config.start_date) ||
+        !valid_date(meditation_config.end_date) ||
+        !date_inside_range(time_info, meditation_config.start_date,
+                           meditation_config.end_date))
         return;
-    }
-
-    if (
-        !day_allowed(
-            meditation_config.day_mask,
-            time_info.tm_wday
-        )
-    )
+    const int current_minute = minutes_from_midnight(
+        time_info.tm_hour, time_info.tm_min);
+    for (std::size_t i = 0; i < meditation_config.time_count; ++i)
     {
+        const MeditationWindow& window = meditation_config.times[i];
+        if (current_minute != minutes_from_midnight(
+                window.start.hour, window.start.minute))
+            continue;
+        if (meditation_runtime.last_trigger_year == time_info.tm_year &&
+            meditation_runtime.last_trigger_year_day == time_info.tm_yday &&
+            meditation_runtime.last_trigger_minute == current_minute)
+            return;
+        QueuedReminder reminder;
+        reminder.type = ReminderType::MEDITATION;
+        reminder.schedule_index = static_cast<int>(i);
+        reminder.display_ms = meditation_config.display_ms;
+        reminder.require_ack = meditation_config.require_ack;
+        if (enqueue_reminder(reminder))
+        {
+            meditation_runtime.last_trigger_year = time_info.tm_year;
+            meditation_runtime.last_trigger_year_day = time_info.tm_yday;
+            meditation_runtime.last_trigger_minute = current_minute;
+        }
         return;
-    }
-
-    if (
-        !time_inside_window(
-            time_info.tm_hour,
-            time_info.tm_min,
-            meditation_config.start_hour,
-            meditation_config.start_minute,
-            meditation_config.end_hour,
-            meditation_config.end_minute
-        )
-    )
-    {
-        return;
-    }
-
-    const bool already_triggered =
-        meditation_runtime.last_trigger_year ==
-            time_info.tm_year &&
-        meditation_runtime.last_trigger_year_day ==
-            time_info.tm_yday;
-
-    if (already_triggered)
-    {
-        return;
-    }
-
-    QueuedReminder reminder;
-
-    reminder.type = ReminderType::MEDITATION;
-    reminder.display_ms = meditation_config.display_ms;
-    reminder.require_ack = meditation_config.require_ack;
-
-    if (enqueue_reminder(reminder))
-    {
-        meditation_runtime.last_trigger_year =
-            time_info.tm_year;
-
-        meditation_runtime.last_trigger_year_day =
-            time_info.tm_yday;
     }
 }
 
@@ -1020,21 +884,17 @@ static void update_medication(
     }
 }
 
-static int64_t calendar_day_number(const std::tm& time_info)
+static int64_t calendar_day_number(int year, unsigned month, unsigned day)
 {
-    std::tm midnight = time_info;
-    midnight.tm_hour = 0;
-    midnight.tm_min = 0;
-    midnight.tm_sec = 0;
-    midnight.tm_isdst = -1;
-
-    const std::time_t value = std::mktime(&midnight);
-    if (value < 0)
-    {
-        return 0;
-    }
-
-    return static_cast<int64_t>(value / 86400);
+    // Civil day number: independent of boot time, timezone and DST.
+    year -= month <= 2;
+    const int era = year / 400;
+    const unsigned year_of_era = static_cast<unsigned>(year - era * 400);
+    const unsigned day_of_year =
+        (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+    const unsigned year_in_era =
+        year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    return static_cast<int64_t>(era) * 146097 + year_in_era;
 }
 
 static void update_bottle_clean(const std::tm& time_info)
@@ -1044,18 +904,15 @@ static void update_bottle_clean(const std::tm& time_info)
         return;
     }
 
-    const int64_t today = calendar_day_number(time_info);
-
-    if (!bottle_clean_runtime.anchor_initialized)
-    {
-        bottle_clean_runtime.anchor_initialized = true;
-        bottle_clean_runtime.anchor_day = today;
+    if (!valid_date(bottle_clean_config.start_date) ||
+        !valid_date(bottle_clean_config.end_date) ||
+        !date_inside_range(time_info, bottle_clean_config.start_date,
+                           bottle_clean_config.end_date))
         return;
-    }
 
     if (
-        time_info.tm_hour != bottle_clean_config.hour ||
-        time_info.tm_min != bottle_clean_config.minute
+        time_info.tm_hour != bottle_clean_config.time.hour ||
+        time_info.tm_min != bottle_clean_config.time.minute
     )
     {
         return;
@@ -1070,8 +927,15 @@ static void update_bottle_clean(const std::tm& time_info)
         return;
     }
 
-    const int64_t elapsed_days = today - bottle_clean_runtime.anchor_day;
-    if (elapsed_days < static_cast<int64_t>(bottle_clean_config.interval_days))
+    const int64_t today = calendar_day_number(
+        time_info.tm_year + 1900,
+        static_cast<unsigned>(time_info.tm_mon + 1),
+        static_cast<unsigned>(time_info.tm_mday));
+    const ReminderDate& start = bottle_clean_config.start_date;
+    const int64_t elapsed_days = today - calendar_day_number(
+        start.year, start.month, start.day);
+    if (elapsed_days < 0 ||
+        elapsed_days % bottle_clean_config.interval_days != 0)
     {
         return;
     }
@@ -1085,116 +949,45 @@ static void update_bottle_clean(const std::tm& time_info)
     {
         bottle_clean_runtime.last_trigger_year = time_info.tm_year;
         bottle_clean_runtime.last_trigger_year_day = time_info.tm_yday;
-        bottle_clean_runtime.anchor_day = today;
     }
 }
 
-static void update_custom(
-    const std::tm& time_info
-)
+static void update_custom(const std::tm& time_info)
 {
-    if (!custom_config.enabled)
+    if (!custom_config.enabled) return;
+    const int current_minute = minutes_from_midnight(
+        time_info.tm_hour, time_info.tm_min);
+    for (std::size_t event_index = 0;
+         event_index < custom_config.event_count; ++event_index)
     {
-        return;
-    }
-
-    const int current_minute =
-        minutes_from_midnight(
-            time_info.tm_hour,
-            time_info.tm_min
-        );
-
-    for (
-        std::size_t event_index = 0;
-        event_index < custom_config.event_count;
-        ++event_index
-    )
-    {
-        const CustomEvent& event =
-            custom_config.events[event_index];
-
-        if (!event.enabled)
-        {
+        const CustomEvent& event = custom_config.events[event_index];
+        if (!day_allowed(event.day_mask, time_info.tm_wday) ||
+            !valid_date(event.start_date) || !valid_date(event.end_date) ||
+            !date_inside_range(time_info, event.start_date, event.end_date))
             continue;
-        }
-
-        const int event_minute =
-            minutes_from_midnight(
-                event.hour,
-                event.minute
-            );
-
-        if (current_minute != event_minute)
+        for (std::size_t i = 0; i < event.time_count; ++i)
         {
-            continue;
-        }
-
-        bool schedule_allowed = false;
-
-        if (
-            event.type ==
-            CustomEventType::RECURRING
-        )
-        {
-            schedule_allowed =
-                day_allowed(
-                    event.day_mask,
-                    time_info.tm_wday
-                );
-        }
-        else
-        {
-            schedule_allowed =
-                same_calendar_date(
-                    time_info,
-                    event.date
-                );
-        }
-
-        if (!schedule_allowed)
-        {
-            continue;
-        }
-
-        CustomEventRuntime& runtime =
-            custom_runtime[event_index];
-
-        const bool already_fired =
-            runtime.last_trigger_year ==
-                time_info.tm_year &&
-            runtime.last_trigger_year_day ==
-                time_info.tm_yday &&
-            runtime.last_trigger_minute ==
-                current_minute;
-
-        if (already_fired)
-        {
-            continue;
-        }
-
-        QueuedReminder reminder;
-
-        reminder.type = ReminderType::CUSTOM;
-
-        reminder.item_index =
-            static_cast<int>(event_index);
-
-        reminder.display_ms =
-            event.display_ms;
-
-        reminder.require_ack =
-            custom_config.require_ack;
-
-        if (enqueue_reminder(reminder))
-        {
-            runtime.last_trigger_year =
-                time_info.tm_year;
-
-            runtime.last_trigger_year_day =
-                time_info.tm_yday;
-
-            runtime.last_trigger_minute =
-                current_minute;
+            const ReminderTime& time = event.times[i];
+            if (current_minute != minutes_from_midnight(time.hour, time.minute))
+                continue;
+            CustomEventRuntime& runtime = custom_runtime[event_index];
+            if (runtime.last_trigger_year == time_info.tm_year &&
+                runtime.last_trigger_year_day == time_info.tm_yday &&
+                runtime.last_trigger_minute == current_minute)
+                break;
+            QueuedReminder reminder;
+            reminder.type = ReminderType::CUSTOM;
+            reminder.item_index = static_cast<int>(event_index);
+            reminder.schedule_index = static_cast<int>(i);
+            reminder.display_ms = custom_config.display_ms;
+            reminder.require_ack = custom_config.require_ack;
+            if (enqueue_reminder(reminder))
+            {
+                runtime.last_trigger_year = time_info.tm_year;
+                runtime.last_trigger_year_day = time_info.tm_yday;
+                runtime.last_trigger_minute = current_minute;
+            }
+            break;
         }
     }
 }
@@ -1220,11 +1013,7 @@ void reminder_engine_init()
     bottle_clean_config = {};
     bottle_clean_runtime = {};
 
-    std::memset(
-        custom_runtime,
-        0xFF,
-        sizeof(custom_runtime)
-    );
+    std::memset(custom_runtime, 0xFF, sizeof(custom_runtime));
 
     active_reminder = {};
 
@@ -1333,11 +1122,7 @@ void reminder_engine_set_custom_config(
 {
     custom_config = config;
 
-    std::memset(
-        custom_runtime,
-        0xFF,
-        sizeof(custom_runtime)
-    );
+    std::memset(custom_runtime, 0xFF, sizeof(custom_runtime));
 }
 
 const CustomReminderConfig*
@@ -1502,26 +1287,22 @@ void reminder_engine_update(
 
     update_standard_reminder(
         ReminderType::HYDRATION,
-        time_info,
-        now_ms
+        time_info
     );
 
     update_standard_reminder(
         ReminderType::STRETCH,
-        time_info,
-        now_ms
+        time_info
     );
 
     update_standard_reminder(
         ReminderType::EYE,
-        time_info,
-        now_ms
+        time_info
     );
 
     update_standard_reminder(
         ReminderType::WALK,
-        time_info,
-        now_ms
+        time_info
     );
 
     update_meditation(time_info);

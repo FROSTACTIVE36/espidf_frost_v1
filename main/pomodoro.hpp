@@ -2,19 +2,16 @@
 
 #include <cstddef>
 #include <cstdint>
+#include "reminder_types.hpp"
 
 
 static constexpr std::size_t MAX_POMODORO_LAPS = 12;
 
 struct PomodoroLap
 {
-    bool enabled = true;
-
     uint8_t start_hour = 0;
     uint8_t start_minute = 0;
-
-    uint8_t end_hour = 0;
-    uint8_t end_minute = 0;
+    uint8_t cycles = 1;
 };
 
 
@@ -43,16 +40,11 @@ struct PomodoroConfig
     uint16_t focus_min = 25;
     uint16_t break_min = 5;
 
-    uint8_t cycles = 4;
+    ReminderDate start_date = {};
+    ReminderDate end_date = {};
+    // 0 means every day; bit 0 is Sunday.
+    uint8_t day_mask = 0;
 
-    bool auto_start_break = true;
-    bool auto_start_focus = true;
-
-    /*
-     * Lap mode automatically runs Pomodoro only inside one of
-     * the configured daily time windows.
-     */
-    bool lap_mode_enabled = false;
     PomodoroLap laps[MAX_POMODORO_LAPS] = {};
     std::size_t lap_count = 0;
 
@@ -102,8 +94,7 @@ void pomodoro_force_redraw();
 /*
  * Lap-mode status helpers.
  *
- * Active lap index is -1 when the current time is outside every
- * enabled lap window.
+ * Active lap index is -1 when no lap session is running.
  */
 bool pomodoro_is_lap_mode_enabled();
 int pomodoro_get_active_lap_index();

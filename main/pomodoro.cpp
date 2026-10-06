@@ -48,110 +48,28 @@ static PomodoroState last_rendered_state =
 
 static bool redraw_required = false;
 
-/*
- * -1 means the RTC/system time is outside every enabled lap.
- */
+/* -1 means no lap session is running. */
 static int active_lap_index = -1;
+static int last_started_date[MAX_POMODORO_LAPS] = {};
 
-/* =========================================================
- * Internal helpers
- * ========================================================= */
-
-static int minutes_from_midnight(
-    int hour,
-    int minute
-)
+static int calendar_date(const std::tm& clock)
 {
-    return (hour * 60) + minute;
+    return (clock.tm_year + 1900) * 10000 +
+           (clock.tm_mon + 1) * 100 + clock.tm_mday;
 }
 
-static bool time_inside_lap(
-    const std::tm& time_info,
-    const PomodoroLap& lap
-)
+static int configured_date(const ReminderDate& date)
 {
-    const int current =
-        minutes_from_midnight(
-            time_info.tm_hour,
-            time_info.tm_min
-        );
-
-    const int start =
-        minutes_from_midnight(
-            lap.start_hour,
-            lap.start_minute
-        );
-
-    const int end =
-        minutes_from_midnight(
-            lap.end_hour,
-            lap.end_minute
-        );
-
-    /*
-     * Lap windows use an inclusive start and exclusive end.
-     * Example: 12:30 -> 12:54 is inactive from 12:54:00 onward.
-     */
-    if (start < end)
-    {
-        return current >= start && current < end;
-    }
-
-    /*
-     * Overnight lap, for example 22:00 to 07:00.
-     * The end boundary is exclusive here as well.
-     */
-    if (start > end)
-    {
-        return current >= start || current < end;
-    }
-
-    /* Equal start/end defines an empty lap window. */
-    return false;
+    return date.year * 10000 + date.month * 100 + date.day;
 }
 
-static int find_active_lap()
+static bool scheduled_day(const std::tm& clock)
 {
-    if (
-        !pomodoro_config.lap_mode_enabled ||
-        pomodoro_config.lap_count == 0
-    )
-    {
-        return -1;
-    }
-
-    const std::time_t now =
-        std::time(nullptr);
-
-    std::tm time_info = {};
-
-    localtime_r(
-        &now,
-        &time_info
-    );
-
-    for (
-        std::size_t index = 0;
-        index < pomodoro_config.lap_count;
-        ++index
-    )
-    {
-        const PomodoroLap& lap =
-            pomodoro_config.laps[index];
-
-        if (
-            lap.enabled &&
-            time_inside_lap(
-                time_info,
-                lap
-            )
-        )
-        {
-            return static_cast<int>(index);
-        }
-    }
-
-    return -1;
+    const int today = calendar_date(clock);
+    return today >= configured_date(pomodoro_config.start_date) &&
+           today <= configured_date(pomodoro_config.end_date) &&
+           (pomodoro_config.day_mask == 0 ||
+            (pomodoro_config.day_mask & (1U << clock.tm_wday)) != 0);
 }
 
 static uint64_t current_time_us()
@@ -209,7 +127,7 @@ static void begin_stage(
             current_cycle
         ),
         static_cast<unsigned>(
-            pomodoro_config.cycles
+            pomodoro_config.laps[active_lap_index].cycles
         ),
         static_cast<unsigned long>(
             duration_seconds
@@ -249,6 +167,7 @@ void pomodoro_init()
 
     redraw_required = false;
     active_lap_index = -1;
+    std::fill_n(last_started_date, MAX_POMODORO_LAPS, 0);
 
     last_rendered_seconds =
         UINT32_MAX;
@@ -266,9 +185,6 @@ void pomodoro_set_config(
     const PomodoroConfig& new_config
 )
 {
-    const bool was_running =
-        pomodoro_running;
-
     pomodoro_config =
         new_config;
 
@@ -280,11 +196,6 @@ void pomodoro_set_config(
     if (pomodoro_config.break_min == 0)
     {
         pomodoro_config.break_min = 1;
-    }
-
-    if (pomodoro_config.cycles == 0)
-    {
-        pomodoro_config.cycles = 1;
     }
 
     if (
@@ -310,38 +221,23 @@ void pomodoro_set_config(
             lap.start_hour = 23;
         }
 
-        if (lap.end_hour > 23)
-        {
-            lap.end_hour = 23;
-        }
-
         if (lap.start_minute > 59)
         {
             lap.start_minute = 59;
         }
-
-        if (lap.end_minute > 59)
+        if (lap.cycles == 0)
         {
-            lap.end_minute = 59;
+            lap.cycles = 1;
         }
     }
 
+    pomodoro_stop();
     active_lap_index = -1;
-
-    if (!pomodoro_config.enabled)
-    {
-        /*
-         * A disabled configuration must leave Pomodoro completely inactive.
-         * Stop audio as well, even if runtime state is already STOPPED, so a
-         * stale/queued Pomodoro audio sequence cannot continue after config
-         * is disabled.
-         */
-        pomodoro_stop();
-    }
+    std::fill_n(last_started_date, MAX_POMODORO_LAPS, 0);
 
     ESP_LOGI(
         TAG,
-        "Config: enabled=%d focus=%u break=%u cycles=%u lap_mode=%d laps=%u",
+        "Config: enabled=%d focus=%u break=%u laps=%u",
         pomodoro_config.enabled,
         static_cast<unsigned>(
             pomodoro_config.focus_min
@@ -349,10 +245,6 @@ void pomodoro_set_config(
         static_cast<unsigned>(
             pomodoro_config.break_min
         ),
-        static_cast<unsigned>(
-            pomodoro_config.cycles
-        ),
-        pomodoro_config.lap_mode_enabled,
         static_cast<unsigned>(
             pomodoro_config.lap_count
         )
@@ -366,11 +258,12 @@ const PomodoroConfig& pomodoro_get_config()
 
 bool pomodoro_start()
 {
-    if (!pomodoro_config.enabled)
+    if (!pomodoro_config.enabled || active_lap_index < 0 ||
+        static_cast<std::size_t>(active_lap_index) >= pomodoro_config.lap_count)
     {
         ESP_LOGW(
             TAG,
-            "Pomodoro start ignored because it is disabled"
+            "Pomodoro start ignored without an active lap"
         );
 
         return false;
@@ -416,6 +309,7 @@ void pomodoro_stop()
     stage_total_seconds = 0;
 
     redraw_required = false;
+    active_lap_index = -1;
 
     last_rendered_seconds =
         UINT32_MAX;
@@ -448,7 +342,7 @@ void pomodoro_toggle()
     }
     else
     {
-        pomodoro_start();
+        pomodoro_update();
     }
 }
 
@@ -470,67 +364,35 @@ void pomodoro_update()
         return;
     }
 
-    /*
-     * Lap mode owns automatic start and stop.
-     *
-     * Inside a lap:
-     *   - start automatically when idle
-     *   - keep repeating configured cycles for the whole lap
-     *
-     * Outside a lap:
-     *   - stop immediately
-     */
-    if (
-        pomodoro_config.enabled &&
-        pomodoro_config.lap_mode_enabled &&
-        pomodoro_config.lap_count > 0
-    )
+    // Each lap starts once at its exact local clock minute on an allowed day.
+    const std::time_t wall_time = std::time(nullptr);
+    std::tm clock = {};
+    if (localtime_r(&wall_time, &clock) != nullptr && scheduled_day(clock))
     {
-        const int detected_lap =
-            find_active_lap();
-
-        if (detected_lap != active_lap_index)
+        const int today = calendar_date(clock);
+        for (std::size_t index = 0; index < pomodoro_config.lap_count; ++index)
         {
-            ESP_LOGI(
-                TAG,
-                "Lap changed: previous=%d current=%d",
-                active_lap_index,
-                detected_lap
-            );
-
-            active_lap_index =
-                detected_lap;
-        }
-
-        if (active_lap_index < 0)
-        {
-            if (pomodoro_running)
+            const PomodoroLap& lap = pomodoro_config.laps[index];
+            if (clock.tm_hour != lap.start_hour ||
+                clock.tm_min != lap.start_minute ||
+                last_started_date[index] == today)
             {
-                ESP_LOGI(
-                    TAG,
-                    "Lap ended; stopping Pomodoro"
-                );
-
-                pomodoro_stop();
+                continue;
             }
 
-            return;
+            // A scheduled start is consumed even if a prior lap is still active.
+            last_started_date[index] = today;
+            if (!pomodoro_running)
+            {
+                active_lap_index = static_cast<int>(index);
+                pomodoro_start();
+            }
+            else
+            {
+                ESP_LOGW(TAG, "Skipping overlapping Pomodoro lap %u",
+                         static_cast<unsigned>(index));
+            }
         }
-
-        if (!pomodoro_running)
-        {
-            ESP_LOGI(
-                TAG,
-                "Lap %d active; auto-starting Pomodoro",
-                active_lap_index
-            );
-
-            pomodoro_start();
-        }
-    }
-    else
-    {
-        active_lap_index = -1;
     }
 
     if (!pomodoro_running)
@@ -560,60 +422,15 @@ void pomodoro_update()
 
     remaining_seconds = 0;
 
-    const bool lap_mode_active =
-        pomodoro_config.lap_mode_enabled &&
-        active_lap_index >= 0;
-
     if (
         pomodoro_state ==
         PomodoroState::FOCUS
     )
     {
-        /*
-         * In lap mode every focus stage is followed by a break.
-         * Manual mode keeps the previous behaviour and stops after
-         * the configured final focus cycle.
-         */
-        if (
-            !lap_mode_active &&
-            current_cycle >=
-                pomodoro_config.cycles
-        )
-        {
-            ESP_LOGI(
-                TAG,
-                "Pomodoro completed after %u cycles",
-                static_cast<unsigned>(
-                    current_cycle
-                )
-            );
-
-            pomodoro_stop();
-            return;
-        }
-
-        if (
-            pomodoro_config.auto_start_break ||
-            lap_mode_active
-        )
-        {
-            begin_stage(
-                PomodoroState::BREAK,
-                minutes_to_seconds(
-                    pomodoro_config.break_min
-                )
-            );
-        }
-        else
-        {
-            ESP_LOGI(
-                TAG,
-                "Focus completed; auto-start break disabled"
-            );
-
-            pomodoro_stop();
-        }
-
+        begin_stage(
+            PomodoroState::BREAK,
+            minutes_to_seconds(pomodoro_config.break_min)
+        );
         return;
     }
 
@@ -637,55 +454,17 @@ void pomodoro_update()
             return;
         }
 
-        if (lap_mode_active)
+        if (current_cycle >= pomodoro_config.laps[active_lap_index].cycles)
         {
-            /*
-             * Lap mode repeats continuously until its scheduled
-             * time window ends. The cycle counter wraps back to 1.
-             */
-            if (
-                current_cycle >=
-                pomodoro_config.cycles
-            )
-            {
-                current_cycle = 1;
-            }
-            else
-            {
-                ++current_cycle;
-            }
-
-            begin_stage(
-                PomodoroState::FOCUS,
-                minutes_to_seconds(
-                    pomodoro_config.focus_min
-                )
-            );
-
-            return;
-        }
-
-        if (
-            pomodoro_config.auto_start_focus
-        )
-        {
-            ++current_cycle;
-
-            begin_stage(
-                PomodoroState::FOCUS,
-                minutes_to_seconds(
-                    pomodoro_config.focus_min
-                )
-            );
+            ESP_LOGI(TAG, "Pomodoro lap completed after %u cycles",
+                     static_cast<unsigned>(current_cycle));
+            pomodoro_stop();
         }
         else
         {
-            ESP_LOGI(
-                TAG,
-                "Break completed; auto-start focus disabled"
-            );
-
-            pomodoro_stop();
+            ++current_cycle;
+            begin_stage(PomodoroState::FOCUS,
+                        minutes_to_seconds(pomodoro_config.focus_min));
         }
 
         return;
@@ -791,7 +570,7 @@ void pomodoro_force_redraw()
 
 bool pomodoro_is_lap_mode_enabled()
 {
-    return pomodoro_config.lap_mode_enabled;
+    return true;
 }
 
 int pomodoro_get_active_lap_index()

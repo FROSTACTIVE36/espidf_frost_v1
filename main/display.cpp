@@ -518,7 +518,7 @@ void display_show_frost_logo()
 /* =========================================================
  * First-boot onboarding QR
  * ========================================================= */
-static constexpr char WEB_APP_URL[] = "https://app.frostactive.com/";
+static constexpr char WEB_APP_URL[] = "https://habit.frostactive.com/";
 
 static void draw_onboarding_qr(esp_qrcode_handle_t qrcode)
 {

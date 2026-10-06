@@ -270,26 +270,45 @@ static bool parse_date_string(
     return true;
 }
 
-static ReminderMode parse_mode(
-    const cJSON* object
-)
+static int date_number(const ReminderDate& date)
 {
-    const char* mode =
-        get_string(
-            object,
-            "mode",
-            "interval"
-        );
+    return date.year * 10000 + date.month * 100 + date.day;
+}
 
-    if (
-        mode != nullptr &&
-        std::strcmp(mode, "absolute") == 0
-    )
-    {
-        return ReminderMode::ABSOLUTE;
-    }
+static bool parse_date_range(const cJSON* object,
+                             ReminderDate& start, ReminderDate& end)
+{
+    const char* start_text = get_string(object, "start_date");
+    const char* end_text = get_string(object, "end_date");
+    const auto valid_range_date = [](const char* text, ReminderDate& date) {
+        if (text == nullptr || std::strlen(text) != 10 ||
+            text[4] != '-' || text[7] != '-') return false;
+        for (int i = 0; i < 10; ++i)
+            if (i != 4 && i != 7 && (text[i] < '0' || text[i] > '9'))
+                return false;
+        if (!parse_date_string(text, date)) return false;
+        const int days[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+        int maximum = days[date.month - 1];
+        if (date.month == 2 &&
+            (date.year % 400 == 0 ||
+             (date.year % 4 == 0 && date.year % 100 != 0)))
+            maximum = 29;
+        return date.day <= maximum;
+    };
+    return valid_range_date(start_text, start) &&
+           valid_range_date(end_text, end) &&
+           date_number(start) <= date_number(end);
+}
 
-    return ReminderMode::INTERVAL;
+static bool parse_reminder_time(const cJSON* object, ReminderTime& time)
+{
+    if (!cJSON_IsObject(object)) return false;
+    const int hour = get_int(object, "h", -1);
+    const int minute = get_int(object, "m", -1);
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return false;
+    time.hour = static_cast<uint8_t>(hour);
+    time.minute = static_cast<uint8_t>(minute);
+    return true;
 }
 
 static void parse_absolute_times(
@@ -369,93 +388,22 @@ static void parse_absolute_times(
     }
 }
 
-static ReminderConfig parse_standard_config(
-    const cJSON* reminder_json
-)
+static ReminderConfig parse_standard_config(const cJSON* reminder_json)
 {
     ReminderConfig config;
-
-    config.enabled =
-        get_bool(
-            reminder_json,
-            "enabled",
-            false
-        );
-
-    config.mode =
-        parse_mode(reminder_json);
-
-    config.interval_ms =
-        static_cast<uint32_t>(
-            get_int(
-                reminder_json,
-                "interval_ms",
-                0
-            )
-        );
-
-    config.display_ms =
-        static_cast<uint32_t>(
-            get_int(
-                reminder_json,
-                "display_ms",
-                10000
-            )
-        );
-
-    config.require_ack =
-        get_bool(
-            reminder_json,
-            "require_ack",
-            false
-        );
-config.start_hour =
-        static_cast<uint8_t>(
-            get_int(
-                reminder_json,
-                "start_hour",
-                0
-            )
-        );
-
-    config.start_minute =
-        static_cast<uint8_t>(
-            get_int(
-                reminder_json,
-                "start_min",
-                0
-            )
-        );
-
-    config.end_hour =
-        static_cast<uint8_t>(
-            get_int(
-                reminder_json,
-                "end_hour",
-                23
-            )
-        );
-
-    config.end_minute =
-        static_cast<uint8_t>(
-            get_int(
-                reminder_json,
-                "end_min",
-                59
-            )
-        );
-
-    config.day_mask =
-        parse_day_mask(
-            reminder_json,
-            "days"
-        );
-
-    parse_absolute_times(
-        reminder_json,
-        config
-    );
-
+    config.enabled = get_bool(reminder_json, "enabled", false);
+    config.display_ms = static_cast<uint32_t>(
+        get_int(reminder_json, "display_ms", 10000));
+    config.require_ack = get_bool(reminder_json, "require_ack", true);
+    config.day_mask = parse_day_mask(reminder_json, "days");
+    const bool valid_range = parse_date_range(
+        reminder_json, config.start_date, config.end_date);
+    parse_absolute_times(reminder_json, config);
+    if (!valid_range || config.absolute_time_count == 0)
+    {
+        config.enabled = false;
+        ESP_LOGW(TAG, "Standard reminder has no valid date range or times");
+    }
     return config;
 }
 
@@ -467,99 +415,67 @@ static BottleCleanConfig parse_bottle_clean_config(
 
     config.enabled = get_bool(bottle_clean_json, "enabled", false);
 
+    const bool valid_range = parse_date_range(
+        bottle_clean_json, config.start_date, config.end_date);
+
     int interval_days = get_int(bottle_clean_json, "interval_days", 7);
     if (interval_days < 1) interval_days = 1;
     if (interval_days > 365) interval_days = 365;
     config.interval_days = static_cast<uint16_t>(interval_days);
 
-    int hour = get_int(bottle_clean_json, "hour", 9);
-    int minute = get_int(bottle_clean_json, "minute", 0);
-    if (hour < 0 || hour > 23) hour = 9;
-    if (minute < 0 || minute > 59) minute = 0;
-    config.hour = static_cast<uint8_t>(hour);
-    config.minute = static_cast<uint8_t>(minute);
+    const bool valid_time = parse_reminder_time(
+        cJSON_GetObjectItemCaseSensitive(bottle_clean_json, "time"),
+        config.time);
 
     int display_ms = get_int(bottle_clean_json, "display_ms", 15000);
     if (display_ms < 0) display_ms = 0;
     config.display_ms = static_cast<uint32_t>(display_ms);
 
     config.require_ack = get_bool(bottle_clean_json, "require_ack", true);
+    if (!valid_range || !valid_time)
+    {
+        config.enabled = false;
+        ESP_LOGW(TAG, "Bottle-clean has no valid date range or time");
+    }
     return config;
 }
 
-static MeditationConfig parse_meditation_config(
-    const cJSON* meditation_json
-)
+static MeditationConfig parse_meditation_config(const cJSON* meditation_json)
 {
     MeditationConfig config;
-
-    config.enabled =
-        get_bool(
-            meditation_json,
-            "enabled",
-            false
-        );
-
-    config.start_hour =
-        static_cast<uint8_t>(
-            get_int(
-                meditation_json,
-                "sh",
-                6
-            )
-        );
-
-    config.start_minute =
-        static_cast<uint8_t>(
-            get_int(
-                meditation_json,
-                "sm",
-                0
-            )
-        );
-
-    config.end_hour =
-        static_cast<uint8_t>(
-            get_int(
-                meditation_json,
-                "eh",
-                7
-            )
-        );
-
-    config.end_minute =
-        static_cast<uint8_t>(
-            get_int(
-                meditation_json,
-                "em",
-                0
-            )
-        );
-
-    const int display_seconds =
-        get_int(
-            meditation_json,
-            "display_sec",
-            600
-        );
-
-    config.display_ms =
-        static_cast<uint32_t>(
-            display_seconds
-        ) * 1000UL;
-
-    config.require_ack =
-        get_bool(
-            meditation_json,
-            "require_ack",
-            false
-        );
-config.day_mask =
-        parse_day_mask(
-            meditation_json,
-            "days"
-        );
-
+    config.enabled = get_bool(meditation_json, "enabled", false);
+    config.display_ms = static_cast<uint32_t>(
+        get_int(meditation_json, "display_ms", 600000));
+    config.require_ack = get_bool(meditation_json, "require_ack", true);
+    config.day_mask = parse_day_mask(meditation_json, "days");
+    const bool valid_range = parse_date_range(
+        meditation_json, config.start_date, config.end_date);
+    const cJSON* times = cJSON_GetObjectItemCaseSensitive(
+        meditation_json, "times");
+    if (cJSON_IsArray(times))
+    {
+        const cJSON* item = nullptr;
+        cJSON_ArrayForEach(item, times)
+        {
+            if (config.time_count >= MAX_ABSOLUTE_TIMES) break;
+            ReminderTime start, end;
+            if (!parse_reminder_time(cJSON_GetObjectItemCaseSensitive(item, "start"), start) ||
+                !parse_reminder_time(cJSON_GetObjectItemCaseSensitive(item, "end"), end))
+            {
+                continue;
+            }
+            const int start_minute = start.hour * 60 + start.minute;
+            const int end_minute = end.hour * 60 + end.minute;
+            // Meditation windows begin and end on the same calendar day.
+            if (end_minute <= start_minute) continue;
+            config.times[config.time_count++] = {start, end};
+        }
+    }
+    if (!valid_range || config.time_count == 0)
+    {
+        config.enabled = false;
+        ESP_LOGW(TAG, "Meditation has no valid date range or windows");
+    }
     return config;
 }
 
@@ -845,12 +761,9 @@ static CustomReminderConfig parse_custom_config(
             false
         );
 
-    config.require_ack =
-        get_bool(
-            custom_json,
-            "require_ack",
-            true
-        );
+    config.require_ack = get_bool(custom_json, "require_ack", true);
+    config.display_ms = static_cast<uint32_t>(
+        get_int(custom_json, "display_ms", 60000));
 const cJSON* events =
         cJSON_GetObjectItemCaseSensitive(
             custom_json,
@@ -886,13 +799,7 @@ const cJSON* events =
             config.events[
                 config.event_count
             ];
-
-        event.enabled =
-            get_bool(
-                event_json,
-                "enabled",
-                true
-            );
+        event = {};
 
         copy_string(
             event.id,
@@ -914,67 +821,26 @@ const cJSON* events =
             )
         );
 
-        const char* type =
-            get_string(
-                event_json,
-                "type",
-                "recurring"
-            );
-
-        if (
-            type != nullptr &&
-            std::strcmp(type, "absolute") == 0
-        )
+        event.day_mask = parse_day_mask(event_json, "days");
+        const bool valid_range = parse_date_range(
+            event_json, event.start_date, event.end_date);
+        const cJSON* times = cJSON_GetObjectItemCaseSensitive(event_json, "times");
+        if (cJSON_IsArray(times))
         {
-            event.type =
-                CustomEventType::ABSOLUTE;
+            const cJSON* item = nullptr;
+            cJSON_ArrayForEach(item, times)
+            {
+                if (event.time_count >= MAX_ABSOLUTE_TIMES) break;
+                ReminderTime time;
+                if (!parse_reminder_time(item, time)) continue;
+                event.times[event.time_count++] = time;
+            }
         }
-        else
+        if (!valid_range || event.time_count == 0)
         {
-            event.type =
-                CustomEventType::RECURRING;
+            ESP_LOGW(TAG, "Skipping custom event with invalid date range or times");
+            continue;
         }
-
-        event.hour =
-            static_cast<uint8_t>(
-                get_int(
-                    event_json,
-                    "h",
-                    0
-                )
-            );
-
-        event.minute =
-            static_cast<uint8_t>(
-                get_int(
-                    event_json,
-                    "m",
-                    0
-                )
-            );
-
-        event.display_ms =
-            static_cast<uint32_t>(
-                get_int(
-                    event_json,
-                    "show_ms",
-                    60000
-                )
-            );
-
-        event.day_mask =
-            parse_day_mask(
-                event_json,
-                "days"
-            );
-
-        parse_date_string(
-            get_string(
-                event_json,
-                "date"
-            ),
-            event.date
-        );
 
         event.text_x =
             static_cast<int16_t>(
@@ -1477,28 +1343,14 @@ static PomodoroConfig parse_pomodoro_config(
             )
         );
 
-    config.cycles =
-        static_cast<uint8_t>(
-            get_int(
-                pomodoro_json,
-                "cycles",
-                4
-            )
-        );
-
-    config.auto_start_break =
-        get_bool(
-            pomodoro_json,
-            "auto_start_break",
-            true
-        );
-
-    config.auto_start_focus =
-        get_bool(
-            pomodoro_json,
-            "auto_start_focus",
-            true
-        );
+    config.day_mask = parse_day_mask(pomodoro_json, "days");
+    const bool valid_range = parse_date_range(
+        pomodoro_json, config.start_date, config.end_date);
+    if (!valid_range)
+    {
+        ESP_LOGW(TAG, "Disabling Pomodoro: invalid date range");
+        config.enabled = false;
+    }
 
     if (config.focus_min == 0)
     {
@@ -1508,11 +1360,6 @@ static PomodoroConfig parse_pomodoro_config(
     if (config.break_min == 0)
     {
         config.break_min = 1;
-    }
-
-    if (config.cycles == 0)
-    {
-        config.cycles = 1;
     }
 
     const cJSON* focus_counter =
@@ -1537,13 +1384,6 @@ static PomodoroConfig parse_pomodoro_config(
         parse_pomodoro_counter_style(
             break_counter,
             config.break_counter
-        );
-
-    config.lap_mode_enabled =
-        get_bool(
-            pomodoro_json,
-            "lap_mode_enabled",
-            false
         );
 
     const cJSON* laps =
@@ -1574,60 +1414,11 @@ static PomodoroConfig parse_pomodoro_config(
                 continue;
             }
 
-            const int start_hour =
-                get_int(
-                    lap_json,
-                    "sh",
-                    get_int(
-                        lap_json,
-                        "start_hour",
-                        -1
-                    )
-                );
-
-            const int start_minute =
-                get_int(
-                    lap_json,
-                    "sm",
-                    get_int(
-                        lap_json,
-                        "start_min",
-                        -1
-                    )
-                );
-
-            const int end_hour =
-                get_int(
-                    lap_json,
-                    "eh",
-                    get_int(
-                        lap_json,
-                        "end_hour",
-                        -1
-                    )
-                );
-
-            const int end_minute =
-                get_int(
-                    lap_json,
-                    "em",
-                    get_int(
-                        lap_json,
-                        "end_min",
-                        -1
-                    )
-                );
-
-            if (
-                start_hour < 0 ||
-                start_hour > 23 ||
-                start_minute < 0 ||
-                start_minute > 59 ||
-                end_hour < 0 ||
-                end_hour > 23 ||
-                end_minute < 0 ||
-                end_minute > 59
-            )
+            ReminderTime start = {};
+            const int cycles = get_int(lap_json, "cycles", -1);
+            if (!parse_reminder_time(
+                    cJSON_GetObjectItemCaseSensitive(lap_json, "start"), start) ||
+                cycles < 1 || cycles > 255)
             {
                 ESP_LOGW(
                     TAG,
@@ -1642,32 +1433,9 @@ static PomodoroConfig parse_pomodoro_config(
                     config.lap_count
                 ];
 
-            lap.enabled =
-                get_bool(
-                    lap_json,
-                    "enabled",
-                    true
-                );
-
-            lap.start_hour =
-                static_cast<uint8_t>(
-                    start_hour
-                );
-
-            lap.start_minute =
-                static_cast<uint8_t>(
-                    start_minute
-                );
-
-            lap.end_hour =
-                static_cast<uint8_t>(
-                    end_hour
-                );
-
-            lap.end_minute =
-                static_cast<uint8_t>(
-                    end_minute
-                );
+            lap.start_hour = start.hour;
+            lap.start_minute = start.minute;
+            lap.cycles = static_cast<uint8_t>(cycles);
 
             ++config.lap_count;
         }
