@@ -14,6 +14,7 @@
 namespace
 {
 constexpr char TAG[] = "WIFI_MANAGER";
+constexpr char WIFI_HOSTNAME[] = "FROST";
 constexpr char NVS_NAMESPACE[] = "frost_wifi";
 constexpr char NVS_SSID_KEY[] = "ssid";
 constexpr char NVS_PASSWORD_KEY[] = "password";
@@ -96,10 +97,22 @@ esp_err_t wifi_manager_init()
         return loop_result;
     }
 
-    esp_netif_create_default_wifi_sta();
+    esp_netif_t* station = esp_netif_create_default_wifi_sta();
+    if (station == nullptr)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Advertise the device name through DHCP before Wi-Fi starts.
+    esp_err_t result = esp_netif_set_hostname(station, WIFI_HOSTNAME);
+    if (result != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to set Wi-Fi hostname: %s", esp_err_to_name(result));
+        return result;
+    }
 
     wifi_init_config_t wifi_init = WIFI_INIT_CONFIG_DEFAULT();
-    esp_err_t result = esp_wifi_init(&wifi_init);
+    result = esp_wifi_init(&wifi_init);
     if (result != ESP_OK)
     {
         return result;
@@ -134,7 +147,8 @@ esp_err_t wifi_manager_init()
     }
 
     initialized = true;
-    ESP_LOGI(TAG, "Wi-Fi manager ready; credentials=%s", credentials_available ? "yes" : "no");
+    ESP_LOGI(TAG, "Wi-Fi manager ready; hostname=%s credentials=%s",
+             WIFI_HOSTNAME, credentials_available ? "yes" : "no");
     return ESP_OK;
 }
 
