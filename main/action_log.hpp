@@ -45,6 +45,8 @@ void action_log_show_volume(
 );
 
 void action_log_show_configuration_updated(uint32_t duration_ms = 3000);
+void action_log_show_configuration_syncing();
+void action_log_show_configuration_failed(const char* reason = "Sync failed", uint32_t duration_ms = 3000);
 
 void action_log_show_ota(
     const char* message,

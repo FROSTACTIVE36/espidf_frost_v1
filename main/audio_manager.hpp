@@ -78,6 +78,7 @@ void audio_manager_stop_healing();
 void audio_manager_set_dock_state(bool docked);
 bool audio_manager_is_docked();
 void audio_manager_play_welcome();
+void audio_manager_play_low_water_announcement();
 void audio_manager_play_reminder(ReminderType type);
 
 /* Calibration voice prompts stored as /mp3/0020.mp3 to /mp3/0024.mp3. */

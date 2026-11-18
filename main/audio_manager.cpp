@@ -67,7 +67,7 @@ constexpr uint16_t TONE_POMO_BREAK   = 21;  // /mp3/0021.mp3
 constexpr uint16_t TONE_MEDITATION   = 22;  // /mp3/0022.mp3
 constexpr uint16_t TONE_CUSTOM       = 23;  // /mp3/0023.mp3
 constexpr uint16_t TONE_PLACE_BOTTLE = 24;  // /mp3/0024.mp3
-constexpr uint16_t TONE_ACK          = 30;  // /mp3/0030.mp3
+constexpr uint16_t TONE_LOW_WATER    = 30;  // /mp3/0030.mp3
 constexpr uint16_t TONE_CAL_REMOVE_BOTTLE = 25; // /mp3/0020.mp3
 constexpr uint16_t TONE_CAL_EMPTY_BOTTLE  = 26; // /mp3/0021.mp3
 constexpr uint16_t TONE_CAL_FULL_BOTTLE   = 27; // /mp3/0022.mp3
@@ -963,6 +963,19 @@ void audio_manager_play_calibration_announcement(
     }
 
     dfplayer_play_track(track);
+}
+
+void audio_manager_play_low_water_announcement()
+{
+    ESP_LOGI(TAG, "Low water announcement track=%u", static_cast<unsigned>(TONE_LOW_WATER));
+    if (background_mode != AudioBackgroundMode::NONE)
+    {
+        dfplayer_play_advertisement(TONE_LOW_WATER);
+    }
+    else
+    {
+        dfplayer_play_track(TONE_LOW_WATER);
+    }
 }
 
 void audio_manager_play_welcome()

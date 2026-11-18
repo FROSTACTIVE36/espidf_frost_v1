@@ -19,6 +19,7 @@ constexpr int BAUD_RATE = 9600;
 constexpr int RX_BUFFER_SIZE = 512;
 constexpr uint8_t FEEDBACK = 0x00;
 
+constexpr uint8_t CMD_QUERY_STATUS = 0x42;
 constexpr uint8_t CMD_PLAY_TRACK = 0x12;
 constexpr uint8_t CMD_SET_VOLUME = 0x06;
 constexpr uint8_t CMD_SELECT_DEVICE = 0x09;
@@ -273,4 +274,31 @@ void dfplayer_update()
     {
         ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, length, ESP_LOG_DEBUG);
     }
+}
+// Query the module and require a valid reply. UART transmit alone does not
+// establish that a player is physically connected.
+bool dfplayer_is_healthy()
+{
+    if (!initialized) return false;
+    uart_flush_input(UART_PORT);
+    if (send_command(CMD_QUERY_STATUS, 0) != ESP_OK) return false;
+    uint8_t frame[10] = {};
+    size_t used = 0;
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(350);
+    while (static_cast<int32_t>(deadline - xTaskGetTickCount()) > 0)
+    {
+        uint8_t byte = 0;
+        if (uart_read_bytes(UART_PORT, &byte, 1, pdMS_TO_TICKS(20)) != 1) continue;
+        if (used == 0 && byte != 0x7E) continue;
+        frame[used++] = byte;
+        if (used < sizeof(frame)) continue;
+        const uint16_t received = (static_cast<uint16_t>(frame[7]) << 8) | frame[8];
+        const uint16_t parameter = (static_cast<uint16_t>(frame[5]) << 8) | frame[6];
+        if (frame[1] == 0xFF && frame[2] == 0x06 && frame[9] == 0xEF &&
+            received == checksum(frame[3], frame[4], parameter) &&
+            frame[3] == CMD_QUERY_STATUS) return true;
+        used = byte == 0x7E ? 1 : 0;
+        if (used == 1) frame[0] = byte;
+    }
+    return false;
 }

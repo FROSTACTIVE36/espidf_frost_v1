@@ -27,6 +27,7 @@
 #include "rtc_ds3231.hpp"
 #include "configuration_storage.hpp"
 #include "scale.hpp"
+#include "dfplayer.hpp"
 #include "bottle_calibration.hpp"
 #include "consumption_tracker.hpp"
 #include "statistics_history.hpp"
@@ -69,10 +70,26 @@ enum class SystemState : uint8_t
     CALIBRATION,
     OTA,
     CONSUMPTION,
-    DEMO
+    DEMO,
+    SERVICE_ERROR
 };
 
+static uint64_t application_millis();
 static SystemState system_state = SystemState::IDLE;
+static uint8_t service_error = 0;
+static uint64_t service_bypass_until_ms = 0;
+static constexpr uint64_t SERVICE_BYPASS_DURATION_MS = 10ULL * 60ULL * 1000ULL;
+static bool service_bypass_active(uint64_t now_ms)
+{
+    return service_bypass_until_ms != 0 && now_ms < service_bypass_until_ms;
+}
+
+static uint64_t last_service_check_ms = 0;
+static constexpr uint32_t SERVICE_CHECK_INTERVAL_MS = 5000;
+static uint8_t scale_failures = 0;
+static uint8_t rtc_failures = 0;
+static uint8_t audio_failures = 0;
+
 
 static constexpr uint32_t MAIN_LOOP_PERIOD_MS = 20;
 static constexpr uint32_t SYSTEM_DIAGNOSTIC_INTERVAL_MS = 5000;
@@ -108,6 +125,9 @@ static const char* system_state_name(SystemState state)
 {
     switch (state)
     {
+        case SystemState::SERVICE_ERROR:
+            return "SERVICE_ERROR";
+
         case SystemState::IDLE:
             return "IDLE";
 
@@ -172,6 +192,8 @@ static void transition_system_state(
 
 static SystemState determine_system_state()
 {
+    if (service_error != 0 && !service_bypass_active(application_millis())) return SystemState::SERVICE_ERROR;
+
     if (onboarding_is_required())
     {
         return SystemState::ONBOARDING;
@@ -1734,6 +1756,10 @@ static bool apply_bluetooth_json(
         return false;
     }
 
+    /* A new configuration may carry a default volume. Preserve a volume
+     * explicitly chosen with SET VOLUME across configuration syncs. */
+    bluetooth_restore_saved_volume();
+
      const esp_err_t save_error =
         configuration_storage_save(
             json_text,
@@ -2076,6 +2102,7 @@ extern "C" void app_main()
     else
     {
         /* Play the welcome note while the FROST logo remains visible. */
+        bluetooth_restore_saved_volume();
         vTaskDelay(pdMS_TO_TICKS(200));
         audio_manager_play_welcome();
     }
@@ -2165,6 +2192,12 @@ extern "C" void app_main()
         );
     }
 
+    /* JSON has its own default volume; keep the user's saved choice. */
+    if (audio_result == ESP_OK)
+    {
+        bluetooth_restore_saved_volume();
+    }
+
     /* -----------------------------------------------------
      * Initialize action log, Wi-Fi and OTA
      * ----------------------------------------------------- */
@@ -2204,6 +2237,15 @@ extern "C" void app_main()
     diagnostic_window_started_us =
         static_cast<uint64_t>(esp_timer_get_time());
 
+    // Take an initial measurement before entering the screen state machine.
+    // A failed scale sample is retried on subsequent checks.
+    scale_failures = scale_is_healthy() ? 0 : 3;
+    rtc_failures = rtc_ds3231_is_healthy() ? 0 : 3;
+    audio_failures = dfplayer_is_healthy() ? 0 : 3;
+    service_error = scale_failures >= 3 ? 1 : rtc_failures >= 3 ? 2 : audio_failures >= 3 ? 3 : 0;
+    if (service_error != 0) display_show_service_error(service_error);
+    last_service_check_ms = application_millis();
+
     system_state = determine_system_state();
 
     ESP_LOGI(
@@ -2221,6 +2263,59 @@ extern "C" void app_main()
 
         const time_t now =
             time(nullptr);
+
+        const uint64_t check_ms = application_millis();
+        if (bluetooth_take_service_bypass_off_request())
+        {
+            service_bypass_until_ms = 0;
+            ESP_LOGW(TAG, "Developer service bypass disabled");
+            if (service_error) display_show_service_error(service_error);
+        }
+        if (bluetooth_take_service_bypass_on_request())
+        {
+            service_bypass_until_ms = check_ms + SERVICE_BYPASS_DURATION_MS;
+            ESP_LOGW(TAG, "Developer service bypass active for 10 minutes; error E%02u still monitored", service_error);
+            last_idle_display_ms = 0;
+            if (service_error)
+            {
+                if (onboarding_is_required()) display_show_onboarding_qr();
+                else display_show_home_clock(now);
+            }
+        }
+        if (service_bypass_until_ms != 0 && check_ms >= service_bypass_until_ms)
+        {
+            service_bypass_until_ms = 0;
+            ESP_LOGW(TAG, "Developer service bypass expired; error E%02u", service_error);
+            if (service_error) display_show_service_error(service_error);
+        }
+        if (check_ms - last_service_check_ms >= SERVICE_CHECK_INTERVAL_MS)
+        {
+            last_service_check_ms = check_ms;
+            // Avoid consuming a conversion owned by the calibration workflow.
+            if (!bottle_calibration_is_active())
+            {
+                const bool good = scale_is_healthy();
+                scale_failures = good ? 0 : static_cast<uint8_t>(scale_failures < 3 ? scale_failures + 1 : 3);
+            }
+            const bool rtc_good = rtc_ds3231_is_healthy();
+            rtc_failures = rtc_good ? 0 : static_cast<uint8_t>(rtc_failures < 3 ? rtc_failures + 1 : 3);
+            const bool audio_good = dfplayer_is_healthy();
+            audio_failures = audio_good ? 0 : static_cast<uint8_t>(audio_failures < 3 ? audio_failures + 1 : 3);
+            const uint8_t new_error = scale_failures >= 3 ? 1 : rtc_failures >= 3 ? 2 : audio_failures >= 3 ? 3 : 0;
+            if (new_error != service_error)
+            {
+                ESP_LOGW(TAG, "Service error: E%02u -> E%02u", service_error, new_error);
+                service_error = new_error;
+                if (service_error && !service_bypass_active(check_ms)) display_show_service_error(service_error);
+                else last_idle_display_ms = 0;
+            }
+        }
+        if (service_error != 0 && !service_bypass_active(check_ms))
+        {
+            // Hardware recovery is checked above; no other screen may replace this one.
+            vTaskDelay(pdMS_TO_TICKS(MAIN_LOOP_PERIOD_MS));
+            continue;
+        }
 
         if (bluetooth_take_bind_reset_request())
         {
@@ -2334,6 +2429,10 @@ extern "C" void app_main()
 
         switch (system_state)
         {
+            case SystemState::SERVICE_ERROR:
+                if (service_error) display_show_service_error(service_error);
+                break;
+
             case SystemState::ONBOARDING:
             {
                 if (!onboarding_is_required())

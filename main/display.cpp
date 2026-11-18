@@ -19,6 +19,7 @@
 #include "images/font_regular.h"
 #include "images/font_small.h"
 #include "action_log.hpp"
+#include "consumption_tracker.hpp"
 #include "images/drinkwater1.h"
 #include "images/image_time_to_stretch_inverted.h"
 #include "images/rule.h"
@@ -467,6 +468,25 @@ void display_clear(uint16_t color)
     }
 
     display.fillScreen(color);
+}
+
+void display_show_service_error(uint8_t error_number)
+{
+    if (!display_ready || !sprite_ready) return;
+
+    char code[8] = {};
+    std::snprintf(code, sizeof(code), "E%02u", static_cast<unsigned>(error_number));
+    screen.fillSprite(TFT_BLACK);
+    screen.setTextDatum(lgfx::textdatum_t::middle_center);
+    screen.setTextColor(TFT_WHITE);
+    screen.setTextSize(1);
+    screen.loadFont(font);
+    screen.drawString(code, DISPLAY_WIDTH / 2, 96);
+    screen.unloadFont();
+    screen.loadFont(font_small);
+    screen.drawString("Service needed", DISPLAY_WIDTH / 2, 151);
+    screen.unloadFont();
+    present_screen_frame(false);
 }
 
 /* =========================================================
@@ -1807,7 +1827,7 @@ void display_show_home_clock(time_t current_time)
     screen.drawString(
         time_text,
         CLOCK_CENTER_X,
-        CLOCK_CENTER_Y - 20
+        CLOCK_CENTER_Y - 40
     );
 
     screen.unloadFont();
@@ -1816,18 +1836,35 @@ void display_show_home_clock(time_t current_time)
      * Dynamic Home heading. The clock background remains unchanged;
      * FROST is rendered at runtime using font_regular.
      */
-    screen.loadFont(font_regular);
-    screen.setTextDatum(lgfx::textdatum_t::middle_center);
-    screen.setTextColor(TFT_WHITE);
-    screen.setTextSize(1);
-    screen.drawString("FROST", CLOCK_CENTER_X, 45);
-    screen.unloadFont();
+   // screen.loadFont(font_regular);
+    //screen.setTextDatum(lgfx::textdatum_t::middle_center);
+    //screen.setTextColor(TFT_WHITE);
+    //screen.setTextSize(1);
+    //screen.drawString("FROST", CLOCK_CENTER_X, 45);
+    //screen.unloadFont();
 
     screen.loadFont(font_small);
     screen.setTextDatum(lgfx::textdatum_t::middle_center);
     screen.setTextColor(TFT_WHITE);
     screen.setTextSize(1);
-    screen.drawString(date_text, CLOCK_CENTER_X, CLOCK_CENTER_Y + 16);
+    screen.drawString(date_text, CLOCK_CENTER_X, CLOCK_CENTER_Y-5 );
+
+    char hydration_text[32] = {};
+    if (consumption_tracker_bottle_almost_empty())
+    {
+        std::snprintf(hydration_text, sizeof(hydration_text), "Almost empty");
+    }
+    else
+    {
+        std::snprintf(
+            hydration_text,
+            sizeof(hydration_text),
+            "%.3g/%.3g L",
+            static_cast<double>(consumption_tracker_daily_consumed_ml()) / 1000.0,
+            static_cast<double>(consumption_tracker_daily_goal_ml()) / 1000.0
+        );
+    }
+    screen.drawString(hydration_text, CLOCK_CENTER_X, CLOCK_CENTER_Y + 15);
     screen.unloadFont();
 
     draw_dnd_indicator();

@@ -26,3 +26,4 @@ bool scale_read_raw(int32_t& raw_value);
 bool scale_read_weight_g(float& weight_g);
 
 float scale_raw_to_grams(int32_t raw_value);
+bool scale_is_healthy();

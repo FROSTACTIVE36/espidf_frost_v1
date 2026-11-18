@@ -14,3 +14,4 @@ esp_err_t dfplayer_stop();
 
 bool dfplayer_is_playing();
 void dfplayer_update();
+bool dfplayer_is_healthy();

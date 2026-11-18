@@ -24,6 +24,8 @@ constexpr uint32_t SAMPLE_INTERVAL_MS = 80;
 constexpr std::size_t WINDOW_SIZE = 20;
 constexpr uint32_t REQUIRED_STABLE_MS = 1400;
 constexpr uint32_t STEP_TIMEOUT_MS = 30000;
+constexpr uint32_t CALIBRATION_COMPLETE_DISPLAY_MS = 10000;
+constexpr uint32_t CALIBRATION_OTHER_RESULT_DISPLAY_MS = 3000;
 
 /*
  * ADC values fluctuate continuously. We accept a window when:
@@ -622,9 +624,13 @@ void bottle_calibration_update()
         case BottleCalibrationState::CANCELLED:
         case BottleCalibrationState::ERROR:
             /*
-             * Keep the final full-screen message for 3 seconds.
+             * Give the measured capacity longer to read; errors and
+             * cancellation retain their shorter display duration.
              */
-            if (now_ms() - state_started_ms >= 3000)
+            if (now_ms() - state_started_ms >=
+                (state == BottleCalibrationState::COMPLETE
+                    ? CALIBRATION_COMPLETE_DISPLAY_MS
+                    : CALIBRATION_OTHER_RESULT_DISPLAY_MS))
             {
                 state = BottleCalibrationState::IDLE;
             }

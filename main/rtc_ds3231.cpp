@@ -501,6 +501,8 @@ esp_err_t rtc_ds3231_init(void)
             DS3231_I2C_ADDRESS
         );
 
+        i2c_del_master_bus(i2c_bus_handle);
+        i2c_bus_handle = nullptr;
         return error;
     }
 
@@ -535,6 +537,8 @@ esp_err_t rtc_ds3231_init(void)
             esp_err_to_name(error)
         );
 
+        i2c_del_master_bus(i2c_bus_handle);
+        i2c_bus_handle = nullptr;
         return error;
     }
 
@@ -787,4 +791,11 @@ bool rtc_ds3231_get_time_string(
         static_cast<size_t>(written) <
             output_size
     );
+}
+// A successful register read verifies both presence and communication.
+bool rtc_ds3231_is_healthy()
+{
+    if (rtc_ds3231_init() != ESP_OK) return false;
+    uint8_t status = 0;
+    return ds3231_read_register(DS3231_REG_STATUS, &status) == ESP_OK;
 }

@@ -207,9 +207,43 @@ void action_log_show_configuration_updated(uint32_t duration_ms)
         expires_at_ms = current + duration_ms;
         visible_since_ms = current;
 
-        copy_message("Setup Revised");
+        copy_message("Habits loaded");
     }
 
+    taskEXIT_CRITICAL(&lock);
+}
+
+void action_log_show_configuration_syncing()
+{
+    if (!initialized) action_log_init();
+    taskENTER_CRITICAL(&lock);
+    if (!ota_active)
+    {
+        visible = true;
+        source = ActionLogSource::CONFIGURATION;
+        indeterminate = true;
+        progress_percentage = -1;
+        expires_at_ms = 0; // Remain visible until JSON_END, failure or cancellation.
+        visible_since_ms = now_ms();
+        copy_message("Syncing");
+    }
+    taskEXIT_CRITICAL(&lock);
+}
+
+void action_log_show_configuration_failed(const char* reason, uint32_t duration_ms)
+{
+    if (!initialized) action_log_init();
+    taskENTER_CRITICAL(&lock);
+    if (!ota_active && source == ActionLogSource::CONFIGURATION)
+    {
+        visible = true;
+        indeterminate = false;
+        progress_percentage = -1;
+        const uint64_t current = now_ms();
+        expires_at_ms = current + duration_ms;
+        visible_since_ms = current;
+        copy_message(reason);
+    }
     taskEXIT_CRITICAL(&lock);
 }
 

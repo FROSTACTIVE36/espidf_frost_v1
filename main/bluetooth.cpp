@@ -1,5 +1,13 @@
 #include "bluetooth.hpp"
 
+// Developer test firmware only. Change this value before building.
+// The key is deliberately declared here so editing this source file forces
+// bluetooth.cpp to recompile even when the CMake environment was not passed.
+#ifdef FROST_SERVICE_DEV_KEY
+#undef FROST_SERVICE_DEV_KEY
+#endif
+#define FROST_SERVICE_DEV_KEY "MyFrostTestKey1234"
+
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -41,6 +49,47 @@
 
 
 static const char *TAG = "FROST_BLE";
+
+static constexpr char VOLUME_NVS_NAMESPACE[] = "frost_audio";
+static constexpr char VOLUME_NVS_KEY[] = "volume";
+
+void bluetooth_restore_saved_volume(void)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open(VOLUME_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) return;
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "Cannot open saved volume: %s", esp_err_to_name(err));
+        return;
+    }
+
+    uint8_t volume = 0;
+    err = nvs_get_u8(handle, VOLUME_NVS_KEY, &volume);
+    nvs_close(handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) return;
+    if (err != ESP_OK || volume > 30)
+    {
+        ESP_LOGW(TAG, "Saved volume is invalid: %s", esp_err_to_name(err));
+        return;
+    }
+
+    if (!audio_manager_set_volume(volume))
+    {
+        ESP_LOGW(TAG, "Could not restore saved volume %u", static_cast<unsigned>(volume));
+    }
+}
+
+static esp_err_t save_volume(uint8_t volume)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open(VOLUME_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    err = nvs_set_u8(handle, VOLUME_NVS_KEY, volume);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    return err;
+}
 
 
 /* =========================================================
@@ -111,6 +160,24 @@ static std::atomic_bool bind_ok_requested{false};
 static std::atomic_bool bind_reset_requested{false};
 static std::atomic_bool dnd_on_requested{false};
 static std::atomic_bool dnd_off_requested{false};
+static std::atomic_bool service_bypass_on_requested{false};
+static std::atomic_bool service_bypass_off_requested{false};
+static unsigned service_bypass_failed_attempts = 0;
+
+#ifdef FROST_SERVICE_DEV_KEY
+static bool developer_key_matches(const char* input)
+{
+    const char* expected = FROST_SERVICE_DEV_KEY;
+    const size_t length = strlen(expected);
+    if (strlen(input) != length) return false;
+    unsigned difference = 0;
+    for (size_t i = 0; i < length; ++i)
+        difference |= static_cast<unsigned>(static_cast<unsigned char>(input[i]) ^
+                                            static_cast<unsigned char>(expected[i]));
+    return difference == 0;
+}
+#endif
+
 
 static bluetooth_json_handler_t
     json_configuration_handler = nullptr;
@@ -462,6 +529,7 @@ static void begin_json_reception(void)
     reset_json_reception();
 
     json_reception_active = true;
+    action_log_show_configuration_syncing();
 
     set_ble_status("OK:JSON_BEGIN");
 
@@ -516,6 +584,8 @@ static bool append_json_chunk(
         );
 
         reset_json_reception();
+
+        action_log_show_configuration_failed();
 
         set_ble_status(
             "ERROR:JSON_TOO_LARGE"
@@ -595,6 +665,7 @@ static void json_configuration_worker_task(
         else
         {
             set_ble_status("ERROR:JSON_PARSE_FAILED");
+            action_log_show_configuration_failed();
             ESP_LOGE(TAG, "JSON configuration failed");
         }
 
@@ -621,6 +692,7 @@ static bool finish_json_reception(void)
     {
         set_ble_status("ERROR:EMPTY_JSON");
         reset_json_reception();
+        action_log_show_configuration_failed();
         return false;
     }
 
@@ -628,6 +700,7 @@ static bool finish_json_reception(void)
     {
         set_ble_status("ERROR:NO_JSON_HANDLER");
         reset_json_reception();
+        action_log_show_configuration_failed();
         return false;
     }
 
@@ -635,6 +708,7 @@ static bool finish_json_reception(void)
     {
         set_ble_status("ERROR:JSON_WORKER_NOT_READY");
         reset_json_reception();
+        action_log_show_configuration_failed();
         return false;
     }
 
@@ -677,6 +751,7 @@ static bool finish_json_reception(void)
     if (!accepted)
     {
         set_ble_status("ERROR:JSON_WORKER_BUSY");
+        action_log_show_configuration_failed();
         return false;
     }
 
@@ -707,6 +782,34 @@ static bool process_ble_command(
         );
 
         return false;
+    }
+
+    // This command never returns the key. Remove this block for release firmware.
+    constexpr char enable_prefix[] = "DEV:ERRORS:OFF:";
+    constexpr char disable_prefix[] = "DEV:ERRORS:ON:";
+    const bool enable_bypass = strncmp(command, enable_prefix, sizeof(enable_prefix) - 1) == 0;
+    const bool disable_bypass = strncmp(command, disable_prefix, sizeof(disable_prefix) - 1) == 0;
+    if (enable_bypass || disable_bypass)
+    {
+#ifdef FROST_SERVICE_DEV_KEY
+        const char* supplied_key = command +
+            (enable_bypass ? sizeof(enable_prefix) - 1 : sizeof(disable_prefix) - 1);
+        if (service_bypass_failed_attempts >= 5 || !developer_key_matches(supplied_key))
+        {
+            if (service_bypass_failed_attempts < 5) ++service_bypass_failed_attempts;
+            set_ble_status("ERROR:DEV_AUTH");
+            ESP_LOGW(TAG, "Rejected developer command");
+            return false;
+        }
+        if (enable_bypass) service_bypass_on_requested.store(true);
+        else service_bypass_off_requested.store(true);
+        set_ble_status(enable_bypass ? "OK:ERRORS_BYPASS_10MIN" : "OK:ERRORS_ON");
+        ESP_LOGW(TAG, "Developer service bypass %s requested", enable_bypass ? "ON" : "OFF");
+        return true;
+#else
+        set_ble_status("ERROR:DEV_DISABLED");
+        return false;
+#endif
     }
 
     if (strcmp(command, "BIND:OK") == 0)
@@ -1018,6 +1121,14 @@ static bool process_ble_command(
             return false;
         }
 
+        const esp_err_t save_error = save_volume(volume);
+        if (save_error != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Could not save volume: %s", esp_err_to_name(save_error));
+            set_ble_status("ERROR:VOLUME_SAVE");
+            return false;
+        }
+
         action_log_show_volume(
             volume,
             3000
@@ -1180,6 +1291,7 @@ static bool process_ble_command(
     if (strcmp(command, "JSON_CANCEL") == 0)
     {
         reset_json_reception();
+        action_log_show_configuration_failed("Sync cancelled");
 
         set_ble_status(
             "OK:JSON_CANCELLED"
@@ -1527,11 +1639,10 @@ static int command_characteristic_access(
             command[copied_length] = '\0';
         }
 
-        ESP_LOGI(
-            TAG,
-            "Command received: %s",
-            command
-        );
+        if (strncmp(command, "DEV:ERRORS:", 11) == 0)
+            ESP_LOGI(TAG, "Developer command received (key redacted)");
+        else
+            ESP_LOGI(TAG, "Command received: %s", command);
 
         /*
          * The BLE write itself succeeded. Application-level failures are
@@ -2103,4 +2214,14 @@ bool bluetooth_take_dnd_on_request(void)
 bool bluetooth_take_dnd_off_request(void)
 {
     return dnd_off_requested.exchange(false);
+}
+
+bool bluetooth_take_service_bypass_on_request(void)
+{
+    return service_bypass_on_requested.exchange(false);
+}
+
+bool bluetooth_take_service_bypass_off_request(void)
+{
+    return service_bypass_off_requested.exchange(false);
 }

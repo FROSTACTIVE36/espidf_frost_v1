@@ -80,3 +80,8 @@ bool scale_read_weight_g(float& weight_g)
     weight_g = scale_raw_to_grams(raw);
     return true;
 }
+bool scale_is_healthy()
+{
+    int32_t sample = 0;
+    return initialized && hx711_read_raw(sample);
+}

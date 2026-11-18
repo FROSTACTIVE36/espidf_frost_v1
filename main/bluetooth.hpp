@@ -35,6 +35,9 @@ esp_err_t bluetooth_init(
  */
 bool bluetooth_is_initialized(void);
 
+/** Apply the volume saved by SET VOLUME, if one exists. */
+void bluetooth_restore_saved_volume(void);
+
 /**
  * Returns true once when BLE has queued a bottle-calibration start request.
  * Call from the main application task; do not draw from the NimBLE host task.
@@ -59,3 +62,7 @@ bool bluetooth_take_bind_reset_request(void);
 /** DND commands are queued by NimBLE and consumed by app_main. */
 bool bluetooth_take_dnd_on_request(void);
 bool bluetooth_take_dnd_off_request(void);
+
+/** Authorized developer commands, consumed by app_main. */
+bool bluetooth_take_service_bypass_on_request(void);
+bool bluetooth_take_service_bypass_off_request(void);

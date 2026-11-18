@@ -11,6 +11,7 @@ void display_clear(
 );
 
 void display_show_frost_logo();
+void display_show_service_error(uint8_t error_number);
 
 void display_show_hydration_reminder();
 void display_show_stretch_reminder();

@@ -1,3 +1,11 @@
+
+
+
+
+
+
+
+
 idf_component_register(
     SRCS
         "main.cpp"
@@ -52,3 +60,20 @@ target_include_directories(
     PRIVATE
         ../components/LovyanGFX/src
 )
+# Optional developer-only service screen bypass. Supply a unique 16–64 character
+# alphanumeric key via the build environment; omit it in production builds.
+if(DEFINED ENV{FROST_SERVICE_DEV_KEY} AND NOT "$ENV{FROST_SERVICE_DEV_KEY}" STREQUAL "")
+    set(_frost_service_key "$ENV{FROST_SERVICE_DEV_KEY}")
+    string(LENGTH "${_frost_service_key}" _frost_service_key_len)
+    message(STATUS "FROST developer key detected: ${_frost_service_key_len} characters")
+    if(_frost_service_key_len LESS 16 OR _frost_service_key_len GREATER 64 OR
+       NOT _frost_service_key MATCHES "^[A-Za-z0-9]+$")
+        message(FATAL_ERROR "FROST_SERVICE_DEV_KEY must be 16 to 64 alphanumeric characters")
+    endif()
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE
+        FROST_SERVICE_DEV_KEY=\"${_frost_service_key}\")
+endif()
+
+
+
+

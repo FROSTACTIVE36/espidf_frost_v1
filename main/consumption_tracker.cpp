@@ -6,6 +6,7 @@
 #include <ctime>
 
 #include "display.hpp"
+#include "audio_manager.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs.h"
@@ -26,6 +27,7 @@ constexpr uint32_t CONSUMPTION_SCREEN_DURATION_MS = 5000;
 constexpr float MIN_CONSUMPTION_ML = 10.0f;
 constexpr float REFILL_THRESHOLD_ML = -20.0f;
 constexpr float CAPACITY_NOISE_ALLOWANCE_ML = 20.0f;
+constexpr float ALMOST_EMPTY_CAPACITY_FRACTION = 0.20f;
 
 /* Non-blocking stable reading window. */
 constexpr uint32_t SAMPLE_INTERVAL_MS = 80;
@@ -75,6 +77,8 @@ bool previous_mean_valid = false;
 float last_remaining_ml = 0.0f;
 // Valid only after the actual bottle level has been measured this boot/session.
 bool remaining_baseline_valid = false;
+bool bottle_almost_empty = false;
+bool announce_low_water_on_measurement = false;
 uint32_t last_consumed_ml = 0;
 uint32_t daily_consumed_ml = 0;
 uint32_t daily_goal_ml = DEFAULT_DAILY_GOAL_ML;
@@ -85,6 +89,13 @@ uint64_t screen_started_ms = 0;
 uint64_t now_ms()
 {
     return static_cast<uint64_t>(esp_timer_get_time() / 1000ULL);
+}
+
+bool is_bottle_almost_empty(float remaining_ml)
+{
+    const ScaleCalibration& calibration = scale_get_calibration();
+    return calibration.valid && calibration.capacity_ml > 0.0f &&
+           remaining_ml < calibration.capacity_ml * ALMOST_EMPTY_CAPACITY_FRACTION;
 }
 
 uint32_t current_yyyymmdd()
@@ -407,6 +418,11 @@ void process_weight(float total_grams)
     {
         last_remaining_ml = water_ml;
         remaining_baseline_valid = true;
+        bottle_almost_empty = is_bottle_almost_empty(water_ml);
+        if (bottle_almost_empty && announce_low_water_on_measurement)
+        {
+            audio_manager_play_low_water_announcement();
+        }
         ESP_LOGI(TAG, "Runtime bottle baseline established at %.1fml; no consumption recorded", water_ml);
         return;
     }
@@ -453,6 +469,11 @@ void process_weight(float total_grams)
 
     /* Arduino always updates the baseline after classification. */
     last_remaining_ml = water_ml;
+    bottle_almost_empty = is_bottle_almost_empty(water_ml);
+    if (bottle_almost_empty && announce_low_water_on_measurement)
+    {
+        audio_manager_play_low_water_announcement();
+    }
 }
 }
 
@@ -468,6 +489,8 @@ esp_err_t consumption_tracker_init()
     // Never assume the bottle is full after reboot. Measure its actual level first.
     last_remaining_ml = 0.0f;
     remaining_baseline_valid = false;
+    bottle_almost_empty = false;
+    announce_low_water_on_measurement = false;
 
     initialized = true;
 
@@ -500,6 +523,8 @@ void consumption_tracker_set_enabled(bool enabled)
     if (!tracking_enabled)
     {
         screen_active = false;
+        bottle_almost_empty = false;
+        announce_low_water_on_measurement = false;
     }
 }
 
@@ -512,6 +537,7 @@ void consumption_tracker_set_initial_remaining(float remaining_ml)
 
     last_remaining_ml = remaining_ml;
     remaining_baseline_valid = true;
+    bottle_almost_empty = is_bottle_almost_empty(remaining_ml);
     ESP_LOGI(TAG, "Consumption baseline set to %.1f ml", last_remaining_ml);
 }
 
@@ -531,6 +557,7 @@ void consumption_tracker_set_docked(bool new_docked)
         // establish the real baseline without recording consumption.
         if (docked && !remaining_baseline_valid)
         {
+            announce_low_water_on_measurement = false;
             state = TrackerState::SETTLING;
             settling_started_ms = now_ms();
             reset_measurement_window();
@@ -550,6 +577,8 @@ void consumption_tracker_set_docked(bool new_docked)
 
     if (!docked)
     {
+        bottle_almost_empty = false;
+        announce_low_water_on_measurement = false;
         /* Bottle removed: cancel a pending return measurement. */
         state = TrackerState::IDLE;
         reset_measurement_window();
@@ -559,6 +588,7 @@ void consumption_tracker_set_docked(bool new_docked)
 
     if (!was_docked && docked)
     {
+        announce_low_water_on_measurement = true;
         /* Removed -> docked edge: mandatory five-second settle delay. */
         state = TrackerState::SETTLING;
         settling_started_ms = now_ms();
@@ -618,6 +648,7 @@ void consumption_tracker_update()
 
     if (current - measuring_started_ms >= MEASUREMENT_TIMEOUT_MS)
     {
+        announce_low_water_on_measurement = false;
         ESP_LOGW(TAG, "Stable weight timeout; measurement cancelled");
         state = TrackerState::IDLE;
         reset_measurement_window();
@@ -634,6 +665,7 @@ void consumption_tracker_update()
     state = TrackerState::IDLE;
     reset_measurement_window();
     process_weight(total_grams);
+    announce_low_water_on_measurement = false;
 }
 
 bool consumption_tracker_is_busy()
@@ -680,6 +712,11 @@ uint32_t consumption_tracker_daily_consumed_ml()
 uint32_t consumption_tracker_daily_goal_ml()
 {
     return daily_goal_ml;
+}
+
+bool consumption_tracker_bottle_almost_empty()
+{
+    return docked && remaining_baseline_valid && bottle_almost_empty;
 }
 
 void consumption_tracker_set_daily_goal_ml(uint32_t goal_ml)

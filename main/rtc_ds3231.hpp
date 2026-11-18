@@ -37,3 +37,4 @@ bool rtc_ds3231_get_time_string(
     char *output,
     size_t output_size
 );
+bool rtc_ds3231_is_healthy();

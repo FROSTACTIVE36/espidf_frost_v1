@@ -28,6 +28,7 @@ void consumption_tracker_render_screen();
 uint32_t consumption_tracker_last_consumed_ml();
 uint32_t consumption_tracker_daily_consumed_ml();
 uint32_t consumption_tracker_daily_goal_ml();
+bool consumption_tracker_bottle_almost_empty();
 
 void consumption_tracker_set_daily_goal_ml(uint32_t goal_ml);
 void consumption_tracker_reset_daily();
