@@ -12,3 +12,5 @@ void wifi_manager_disconnect();
 
 bool wifi_manager_is_connected();
 void wifi_manager_get_status(char* output, std::size_t output_size);
+/** True only if the Wi-Fi driver initialization call failed at boot. */
+bool wifi_manager_driver_init_failed();

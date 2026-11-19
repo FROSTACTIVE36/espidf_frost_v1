@@ -23,6 +23,7 @@ constexpr EventBits_t FAILED_BIT = BIT1;
 
 EventGroupHandle_t event_group = nullptr;
 bool initialized = false;
+bool wifi_driver_init_failed = false;
 bool credentials_available = false;
 char ssid[33] = {};
 char password[65] = {};
@@ -111,10 +112,12 @@ esp_err_t wifi_manager_init()
         return result;
     }
 
+    wifi_driver_init_failed = false;
     wifi_init_config_t wifi_init = WIFI_INIT_CONFIG_DEFAULT();
     result = esp_wifi_init(&wifi_init);
     if (result != ESP_OK)
     {
+        wifi_driver_init_failed = true;
         return result;
     }
 
@@ -272,4 +275,10 @@ void wifi_manager_get_status(char* output, std::size_t output_size)
         wifi_manager_is_connected() ? "yes" : "no",
         credentials_available ? ssid : ""
     );
+}
+
+// True only when esp_wifi_init itself failed during this boot.
+bool wifi_manager_driver_init_failed()
+{
+    return wifi_driver_init_failed;
 }

@@ -139,6 +139,7 @@ static uint8_t own_address_type = 0;
 static uint16_t command_value_handle = 0;
 
 static bool ble_initialized = false;
+static bool ble_controller_init_failed = false;
 
 /*
  * The user-defined BLE name is stored separately from reminder JSON.
@@ -2074,11 +2075,13 @@ esp_err_t bluetooth_init(
      */
     load_ble_device_name();
 
+    ble_controller_init_failed = false;
     esp_err_t error =
         nimble_port_init();
 
     if (error != ESP_OK)
     {
+        ble_controller_init_failed = true;
         ESP_LOGE(
             TAG,
             "nimble_port_init failed: %s",
@@ -2224,4 +2227,10 @@ bool bluetooth_take_service_bypass_on_request(void)
 bool bluetooth_take_service_bypass_off_request(void)
 {
     return service_bypass_off_requested.exchange(false);
+}
+
+// The NimBLE/controller initialization call failed during this boot.
+bool bluetooth_controller_init_failed(void)
+{
+    return ble_controller_init_failed;
 }

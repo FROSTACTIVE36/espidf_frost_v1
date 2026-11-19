@@ -66,3 +66,6 @@ bool bluetooth_take_dnd_off_request(void);
 /** Authorized developer commands, consumed by app_main. */
 bool bluetooth_take_service_bypass_on_request(void);
 bool bluetooth_take_service_bypass_off_request(void);
+
+/** True only if NimBLE/controller initialization failed at boot. */
+bool bluetooth_controller_init_failed(void);

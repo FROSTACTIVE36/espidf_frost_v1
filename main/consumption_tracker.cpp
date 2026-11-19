@@ -59,6 +59,7 @@ enum class TrackerState : uint8_t
 
 TrackerState state = TrackerState::IDLE;
 bool initialized = false;
+bool daily_loaded = false;
 bool tracking_enabled = true;
 bool dock_state_known = false;
 bool docked = false;
@@ -172,6 +173,7 @@ void load_daily()
 
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK)
     {
+        if (current_yyyymmdd() != 0) daily_loaded = true;
         return;
     }
 
@@ -193,6 +195,7 @@ void load_daily()
         stored.version != STORED_VERSION
     )
     {
+        if (current_yyyymmdd() != 0) daily_loaded = true;
         return;
     }
 
@@ -202,8 +205,15 @@ void load_daily()
     }
 
     const uint32_t today = current_yyyymmdd();
+    if (today == 0)
+    {
+        // RTC has not established the date. Never erase or rewrite saved data.
+        ESP_LOGW(TAG, "Hydration restore deferred until RTC date is valid");
+        return;
+    }
+    daily_loaded = true;
 
-    if (today != 0 && stored.yyyymmdd == today)
+    if (stored.yyyymmdd == today)
     {
         daily_consumed_ml = stored.consumed_ml;
     }
@@ -604,7 +614,12 @@ void consumption_tracker_update()
         return;
     }
 
-    reset_for_new_day_if_needed();
+    if (!daily_loaded && current_yyyymmdd() != 0)
+    {
+        load_daily();
+        // Do not apply a rollover until the saved total has been restored.
+    }
+    if (daily_loaded) reset_for_new_day_if_needed();
 
     const uint64_t current = now_ms();
 

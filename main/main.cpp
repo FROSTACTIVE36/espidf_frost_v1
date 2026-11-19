@@ -2023,6 +2023,9 @@ extern "C" void app_main()
         return;
     }
 
+    // Restore the RTC date before any daily counters read or compare NVS dates.
+    initialize_rtc();
+
     /* Mount SPIFFS and load the rolling 30-day statistics history. */
     const esp_err_t history_result = statistics_history_init();
     if (history_result != ESP_OK)
@@ -2115,12 +2118,6 @@ extern "C" void app_main()
     {
         display_show_onboarding_qr();
     }
-
-    /* -----------------------------------------------------
-     * Initialize RTC
-     * ----------------------------------------------------- */
-
-    initialize_rtc();
 
     /* -----------------------------------------------------
      * Initialize engines
@@ -2242,7 +2239,8 @@ extern "C" void app_main()
     scale_failures = scale_is_healthy() ? 0 : 3;
     rtc_failures = rtc_ds3231_is_healthy() ? 0 : 3;
     audio_failures = dfplayer_is_healthy() ? 0 : 3;
-    service_error = scale_failures >= 3 ? 1 : rtc_failures >= 3 ? 2 : audio_failures >= 3 ? 3 : 0;
+    service_error = scale_failures >= 3 ? 1 : rtc_failures >= 3 ? 2 : audio_failures >= 3 ? 3
+                  : wifi_manager_driver_init_failed() ? 4 : bluetooth_controller_init_failed() ? 5 : 0;
     if (service_error != 0) display_show_service_error(service_error);
     last_service_check_ms = application_millis();
 
@@ -2301,7 +2299,8 @@ extern "C" void app_main()
             rtc_failures = rtc_good ? 0 : static_cast<uint8_t>(rtc_failures < 3 ? rtc_failures + 1 : 3);
             const bool audio_good = dfplayer_is_healthy();
             audio_failures = audio_good ? 0 : static_cast<uint8_t>(audio_failures < 3 ? audio_failures + 1 : 3);
-            const uint8_t new_error = scale_failures >= 3 ? 1 : rtc_failures >= 3 ? 2 : audio_failures >= 3 ? 3 : 0;
+            const uint8_t new_error = scale_failures >= 3 ? 1 : rtc_failures >= 3 ? 2 : audio_failures >= 3 ? 3
+                                    : wifi_manager_driver_init_failed() ? 4 : bluetooth_controller_init_failed() ? 5 : 0;
             if (new_error != service_error)
             {
                 ESP_LOGW(TAG, "Service error: E%02u -> E%02u", service_error, new_error);
